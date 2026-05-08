@@ -6,8 +6,8 @@ from __future__ import annotations
 # ── API endpoints ──────────────────────────────────────────────────────
 PUBLIC_API = "https://mobile.api.crpt.ru/mobile/check"
 TRUE_API = "https://markirovka.crpt.ru/api/v3/true-api/cises/info"
-AUTH_KEY_URL = "https://markirovka.crpt.ru/api/v3/auth/key"
-AUTH_SIGN_URL = "https://markirovka.crpt.ru/api/v3/auth/simpleSignIn"
+AUTH_KEY_URL = "https://markirovka.crpt.ru/api/v3/true-api/auth/key"
+AUTH_SIGN_URL = "https://markirovka.crpt.ru/api/v3/true-api/auth/simpleSignIn"
 
 # ── HTTP настройки ─────────────────────────────────────────────────────
 TIMEOUT = 20

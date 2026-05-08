@@ -8,9 +8,15 @@
 
 ВАЖНО: КриптоПро CSP 5.x предоставляет CAdESCOM.Store.
        CAPICOM.Store может быть недоступен, если не установлен CAPICOM SDK.
+
+ВАЖНО: Все функции, использующие COM-объекты, должны вызывать
+       pythoncom.CoInitialize() / CoUninitialize() для корректной работы
+       в фоновых потоках (threading.Thread). Без этого вызова COM-объекты
+       недоступны и возвращают ошибку -2147221008 (CoInitialize not called).
 """
 from __future__ import annotations
 
+import contextlib
 import platform
 
 # ── Константы хранилищ ─────────────────────────────────────────────────
@@ -35,6 +41,26 @@ def _log(msg: str, tag: str = "info") -> None:
         _log_fn(msg, tag)
     else:
         print(msg)
+
+
+@contextlib.contextmanager
+def _com_initialized():
+    """Контекстный менеджер для инициализации COM в текущем потоке.
+
+    Необходим для корректной работы COM-объектов в фоновых потоках
+    (threading.Thread). Без CoInitialize() COM возвращает ошибку
+    -2147221008 (CoInitialize was not called).
+    """
+    try:
+        import pythoncom
+        pythoncom.CoInitialize()
+        try:
+            yield
+        finally:
+            pythoncom.CoUninitialize()
+    except ImportError:
+        # pythoncom недоступен (не Windows или нет pywin32)
+        yield
 
 
 def list_certificates() -> list[dict]:
@@ -65,34 +91,36 @@ def list_certificates() -> list[dict]:
         )
         return []
 
-    # 1. CAdESCOM.Store — КриптоПро CSP 5.x (основной)
-    certs = _list_certs_cadescom_store()
-    if certs:
-        _log(f"📋 Найдено сертификатов (CAdESCOM.Store): {len(certs)}", "success")
-        return certs
+    with _com_initialized():
 
-    # 2. CAPICOM.Store — Windows Certificate Store
-    certs = _list_certs_capicom_store()
-    if certs:
-        _log(f"📋 Найдено сертификатов (CAPICOM.Store): {len(certs)}", "success")
-        return certs
+        # 1. CAdESCOM.Store — КриптоПро CSP 5.x (основной)
+        certs = _list_certs_cadescom_store()
+        if certs:
+            _log(f"📋 Найдено сертификатов (CAdESCOM.Store): {len(certs)}", "success")
+            return certs
 
-    # 3. CPCSPStore — legacy CSP 4.x
-    certs = _list_certs_legacy_store()
-    if certs:
-        _log(f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}", "success")
-        return certs
+        # 2. CAPICOM.Store — Windows Certificate Store
+        certs = _list_certs_capicom_store()
+        if certs:
+            _log(f"📋 Найдено сертификатов (CAPICOM.Store): {len(certs)}", "success")
+            return certs
 
-    _log(
-        "⚠ Сертификаты не найдены.\n"
-        "   Проверьте:\n"
-        "   • КриптоПро CSP установлен и лицензия активна\n"
-        "   • USB-токен (RuToken/eToken) подключён\n"
-        "   • Сертификат установлен в хранилище «Личные»\n"
-        "   • В КриптоПро CSP → Сервис → Просмотреть сертификаты — сертификат виден",
-        "warn",
-    )
-    return []
+        # 3. CPCSPStore — legacy CSP 4.x
+        certs = _list_certs_legacy_store()
+        if certs:
+            _log(f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}", "success")
+            return certs
+
+        _log(
+            "⚠ Сертификаты не найдены.\n"
+            "   Проверьте:\n"
+            "   • КриптоПро CSP установлен и лицензия активна\n"
+            "   • USB-токен (RuToken/eToken) подключён\n"
+            "   • Сертификат установлен в хранилище «Личные»\n"
+            "   • В КриптоПро CSP → Сервис → Просмотреть сертификаты — сертификат виден",
+            "warn",
+        )
+        return []
 
 
 def _list_certs_cadescom_store() -> list[dict]:
@@ -322,6 +350,7 @@ def diagnose_com() -> str:
     """Диагностика: какие COM-объекты КриптоПро доступны.
 
     Вызывается для отладки, если сертификаты не найдены.
+    Использует CoInitialize() для работы в фоновых потоках.
     """
     if platform.system() != "Windows":
         return "Диагностика доступна только на Windows."
@@ -331,22 +360,23 @@ def diagnose_com() -> str:
     except ImportError:
         return "pywin32 НЕ установлен. Установите: pip install pywin32"
 
-    results = []
+    with _com_initialized():
+        results = []
 
-    for prog_id in ["CAdESCOM.Store", "CAPICOM.Store", "CPCSPStore.Store",
-                     "CAdESCOM.CPSigner", "CAdESCOM.CadesSignedData",
-                     "CAdESCOM.About"]:
-        try:
-            obj = win32com.client.Dispatch(prog_id)
-            results.append(f"  ✅ {prog_id} — доступен")
-            # Для CAdESCOM.About можно получить версию
-            if prog_id == "CAdESCOM.About":
-                try:
-                    ver = obj.Version
-                    results.append(f"     Версия КриптоПро: {ver}")
-                except Exception:
-                    pass
-        except Exception as e:
-            results.append(f"  ❌ {prog_id} — НЕДОСТУПЕН ({e})")
+        for prog_id in ["CAdESCOM.Store", "CAPICOM.Store", "CPCSPStore.Store",
+                         "CAdESCOM.CPSigner", "CAdESCOM.CadesSignedData",
+                         "CAdESCOM.About"]:
+            try:
+                obj = win32com.client.Dispatch(prog_id)
+                results.append(f"  ✅ {prog_id} — доступен")
+                # Для CAdESCOM.About можно получить версию
+                if prog_id == "CAdESCOM.About":
+                    try:
+                        ver = obj.Version
+                        results.append(f"     Версия КриптоПро: {ver}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                results.append(f"  ❌ {prog_id} — НЕДОСТУПЕН ({e})")
 
-    return "Диагностика COM-объектов КриптоПро:\n" + "\n".join(results)
+        return "Диагностика COM-объектов КриптоПро:\n" + "\n".join(results)

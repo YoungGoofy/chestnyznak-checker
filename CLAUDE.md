@@ -168,7 +168,7 @@ from updater import (
 ## Модуль авторизации через УКЭП (crypto_auth.py)
 
 ### Метод авторизации
-**JWT flow** (единственный метод) — два шага: GET `/auth/key` → подпись challenge → POST `/auth/simpleSignIn`
+**JWT flow** (единственный метод) — два шага: GET `/true-api/auth/key` → подпись challenge → POST `/true-api/auth/simpleSignIn`
 
 United Token был **удалён в v1.2.0** — остался только JWT flow.
 
@@ -192,7 +192,8 @@ United Token был **удалён в v1.2.0** — остался только J
 - **CAPICOM.Store** — это стандартный Windows COM ProgID, который КриптоПро перехватывает и обогащает своими сертификатами. `CAdESCOM.Store` **НЕ существует** как ProgID.
 - **CAdESCOM.CPSigner** и **CAdESCOM.CadesSignedData** — правильные ProgID для подписи (КриптоПро CSP 5.x)
 - **CPCSPStore.Store** — legacy ProgID для CSP 4.x, требует `Open(StoreLocation, StoreName, OpenMode)`
-- **pywin32** нужен для COM-доступа на Windows (`pip install pywin32`), добавлен в `requirements.txt` с условием `sys_platform == "win32"`
+- **pywin32** нужен для COM-доступа на Windows (`pip install pywin32`), добавлен в `requirements.txt` с условием `sys_platform == "win32"`. Включает `pythoncom` для COM-инициализации.
+- **COM и потоки**: все COM-вызовы обёрнуты в `_com_initialized()` (contextmanager) для `pythoncom.CoInitialize()/CoUninitialize()` — это **КРИТИЧЕСКИ ВАЖНО** для фоновых потоков (threading.Thread).
 - Подпись **присоединённая** (attached CMS), кодируется в base64
 - ИНН для JWT flow — извлекается из сертификата (OID `1.2.643.3.131.1.1` или Subject DN)
 

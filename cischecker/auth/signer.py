@@ -12,6 +12,7 @@ import platform
 
 from .certificates import (
     find_cert_in_store,
+    _com_initialized,
     CAPICOM_CURRENT_USER_STORE,
     CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED,
     CAPICOM_STORE_OPEN_READ_ONLY,
@@ -50,18 +51,19 @@ def sign_data(data: bytes, thumbprint: str = "") -> bytes | None:
         _log("❌ pywin32 не установлен. Установите: pip install pywin32", "error")
         return None
 
-    # 1. CAdESCOM (CSP 5.x)
-    result = _sign_cadescom(data, thumbprint)
-    if result is not None:
-        return result
+    with _com_initialized():
+        # 1. CAdESCOM (CSP 5.x)
+        result = _sign_cadescom(data, thumbprint)
+        if result is not None:
+            return result
 
-    # 2. Legacy COM (CSP 4.x)
-    result = _sign_legacy_com(data, thumbprint)
-    if result is not None:
-        return result
+        # 2. Legacy COM (CSP 4.x)
+        result = _sign_legacy_com(data, thumbprint)
+        if result is not None:
+            return result
 
-    _log("❌ Ни один метод подписи не сработал (CAdESCOM, CPCSPStore)", "error")
-    return None
+        _log("❌ Ни один метод подписи не сработал (CAdESCOM, CPCSPStore)", "error")
+        return None
 
 
 def _sign_cadescom(data: bytes, thumbprint: str = "") -> bytes | None:
