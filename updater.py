@@ -272,8 +272,9 @@ def check_for_update() -> tuple[bool, str, dict | None]:
     latest = release["version"]
     cmp = compare_versions(current, latest)
 
-    if cmp >= 0:
+    if cmp <= 0:
         # Текущая версия новее или равна — обновление не нужно
+        # cmp = 0: версии равны; cmp = -1: текущая новее
         return False, f"У вас последняя версия (v{current}).", None
 
     # Доступна новая версия
