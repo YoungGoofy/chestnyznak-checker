@@ -184,12 +184,18 @@ United Token был **удалён в v1.2.0** — остался только J
 3. **cryptcp CLI** (fallback для Linux)
 
 ### Порядок подписи
-1. **CAPICOM.Store + CAdESCOM.CPSigner + CAdESCOM.CadesSignedData** — Windows COM
+1. **CAdESCOM.Store/CAPICOM.Store + CAdESCOM.CPSigner + CAdESCOM.CadesSignedData.SignCades(CADES_BES)** — Windows COM (CSP 5.x)
 2. **CPCSPStore + CPSigner + CPSignedData** — legacy CSP 4.x
 3. **cryptcp CLI** — fallback
 
+### Подпись: важные детали
+- **SignCades()** а НЕ `Sign()` — `Sign()` создаёт CAdES-X Long Type 1 и требует TSP-сервер → падает.
+- **ContentEncoding = 1** (CADESCOM_BASE64_TO_BINARY) обязателен ПЕРЕД установкой Content.
+- **Подпись attached** (присоединённая) — требуется для simpleSignIn.
+- **Переносы строк** (\r\n) удаляются из base64-результата — API ЧЗ их не принимает.
+
 ### Важные детали
-- **CAPICOM.Store** — это стандартный Windows COM ProgID, который КриптоПро перехватывает и обогащает своими сертификатами. `CAdESCOM.Store` **НЕ существует** как ProgID.
+- **CAdESCOM.Store** — ProgID, предоставляемый КриптоПро CSP 5.x для доступа к хранилищу сертификатов (основной метод). **CAPICOM.Store** — стандартный Windows COM ProgID (fallback).
 - **CAdESCOM.CPSigner** и **CAdESCOM.CadesSignedData** — правильные ProgID для подписи (КриптоПро CSP 5.x)
 - **CPCSPStore.Store** — legacy ProgID для CSP 4.x, требует `Open(StoreLocation, StoreName, OpenMode)`
 - **pywin32** нужен для COM-доступа на Windows (`pip install pywin32`), добавлен в `requirements.txt` с условием `sys_platform == "win32"`. Включает `pythoncom` для COM-инициализации.

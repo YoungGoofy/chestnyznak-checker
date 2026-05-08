@@ -72,9 +72,13 @@ pip install pywin32
 В окне УКЭП нажмите кнопку **🔍 Диагностика COM**. В логе появится список доступных COM-объектов:
 
 ```
-✅ CAdESCOM.Store — доступен        ← КриптоПро CSP 5.x работает
-✅ CAdESCOM.CPSigner — доступен     ← подпись доступна
-❌ CAPICOM.Store — НЕДОСТУПЕН       ← это нормально для CSP 5.x
+✅ CAdESCOM.Store — доступен           ← КриптоПро CSP 5.x работает
+✅ CAPICOM.Store — доступен            ← Windows Certificate Store
+❌ CPCSPStore.Store — НЕДОСТУПЕН       ← это нормально для CSP 5.x (legacy 4.x)
+✅ CAdESCOM.CPSigner — доступен       ← подпись доступна
+✅ CAdESCOM.CadesSignedData — доступен ← данные для подписи доступны
+✅ CAdESCOM.About — доступен
+   Версия КриптоПро: 2.0.xxxxx        ← версия CAdESCOM плагина (не CSP!)
 ```
 
 **Шаг 2: Проверьте результаты**

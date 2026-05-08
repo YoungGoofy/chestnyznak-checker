@@ -4,6 +4,12 @@
 Порядок методов:
 1. CAdESCOM (КриптоПро CSP 5.x) — CAdESCOM.CPSigner + CAdESCOM.CadesSignedData
 2. Legacy COM (CSP 4.x) — CPSigner + CPSignedData
+
+ВАЖНО:
+- Используем SignCades(signer, CADESCOM_CADES_BES) а НЕ Sign().
+  Sign() по умолчанию создаёт CAdES-X Long Type 1, который требует TSP-сервер.
+- ContentEncoding = CADESCOM_BASE64_TO_BINARY (1) обязателен перед Content.
+- API ЧЗ требует attached (присоединённую) подпись без переносов строк.
 """
 from __future__ import annotations
 
@@ -72,11 +78,19 @@ def _sign_cadescom(data: bytes, thumbprint: str = "") -> bytes | None:
     Хранилище: CAdESCOM.Store или CAPICOM.Store.
     Signer: CAdESCOM.CPSigner
     Data: CAdESCOM.CadesSignedData
+
+    ВАЖНО: Используем SignCades() с CADESCOM_CADES_BES, а НЕ Sign().
+    Sign() создаёт CAdES-X Long Type 1 и требует TSP-сервер → падает.
     """
     try:
         import win32com.client
     except ImportError:
         return None
+
+    # Константы CAdESCOM
+    CADESCOM_BASE64_TO_BINARY = 1  # ContentEncoding: данные в Content — base64
+    CADESCOM_CADES_BES = 1         # Тип подписи: CAdES-BES (базовая, без TSP)
+    CAPICOM_ENCODE_BASE64 = 0      # Результат Sign/SignCades в Base64
 
     # Пробуем открыть хранилище: сначала CAdESCOM.Store, потом CAPICOM.Store
     store = None
@@ -126,15 +140,26 @@ def _sign_cadescom(data: bytes, thumbprint: str = "") -> bytes | None:
 
         # Создаём SignedData
         signed_data = win32com.client.Dispatch("CAdESCOM.CadesSignedData")
-        # Content — строка с данными для подписи (не base64!)
+
+        # КРИТИЧНО: ContentEncoding ПЕРЕД Content!
+        # Говорим COM что Content будет base64 → он сам декодирует в бинарные данные
+        signed_data.ContentEncoding = CADESCOM_BASE64_TO_BINARY
         signed_data.Content = base64.b64encode(data).decode("ascii")
 
-        # Подписываем: Sign(Signer, Detached, EncodingType)
-        # Detached=False → attached CMS
-        # EncodingType: 0=Base64
-        signature_b64 = signed_data.Sign(signer, False, 0)
+        _log(f"  📝 Данные для подписи: {len(data)} байт")
 
-        _log("  ✅ Данные подписаны (CAdESCOM)", "success")
+        # SignCades(Signer, CadesType, Detached, EncodingType)
+        # CadesType = CADESCOM_CADES_BES (1) — базовая подпись, без TSP
+        # Detached = False → attached (присоединённая) — требуется для simpleSignIn
+        # EncodingType = CAPICOM_ENCODE_BASE64 (0) — результат в base64
+        signature_b64 = signed_data.SignCades(
+            signer, CADESCOM_CADES_BES, False, CAPICOM_ENCODE_BASE64
+        )
+
+        # Убираем переносы строк — API ЧЗ их не принимает
+        signature_b64 = signature_b64.replace("\r", "").replace("\n", "")
+
+        _log("  ✅ Данные подписаны (CAdESCOM, CAdES-BES)", "success")
         return base64.b64decode(signature_b64)
 
     except Exception as e:
