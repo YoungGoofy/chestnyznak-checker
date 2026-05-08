@@ -52,6 +52,13 @@ from check_codes import (
     load_env,
 )
 
+# Импортируем модуль авторизации через УКЭП
+from crypto_auth import (
+    auth_jwt,
+    list_certificates,
+    set_log_fn as set_auth_log_fn,
+)
+
 # Импортируем модуль обновления
 from updater import (
     check_for_update as _check_update,
@@ -64,7 +71,7 @@ from updater import (
 # Константы
 # ══════════════════════════════════════════════════════════════════════
 APP_TITLE = "Честный Знак — Проверка кодов маркировки"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2.0"
 WINDOW_WIDTH = 850
 WINDOW_HEIGHT = 620
 LOG_MAX_LINES = 500
@@ -176,6 +183,9 @@ class App:
         # Загружаем .env
         load_env(SCRIPT_DIR)
 
+        # Подключаем логирование для модуля авторизации
+        set_auth_log_fn(log_to_gui)
+
         # Строим интерфейс
         self._build_menu()
         self._build_layout()
@@ -211,6 +221,7 @@ class App:
                              bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG,
                              activebackground=COLOR_BUTTON_ACTIVE_BG, activeforeground=COLOR_BUTTON_FG)
         settings_menu.add_command(label="🔑 Токен True API...", command=self._open_token_dialog)
+        settings_menu.add_command(label="🔐 Получить токен через УКЭП...", command=self._open_ukep_dialog)
         menubar.add_cascade(label="Настройки", menu=settings_menu)
 
         # Справка
@@ -244,6 +255,10 @@ class App:
         self.token_status_label = Label(top_frame, text=status_text,
                                         font=("Segoe UI", 9), bg=COLOR_HEADER_BG, fg=status_color)
         self.token_status_label.pack(side="right", padx=16, pady=12)
+
+        # Обновляем статус токена с учётом срока действия
+        if token:
+            self._update_token_status(token)
 
         # Кнопка-индикатор обновлений (появляется после проверки)
         self.btn_update = Button(top_frame, text="🔄 Проверка...",
@@ -725,9 +740,14 @@ class App:
             env_path.write_text("\n".join(lines) + "\n", "utf-8")
 
             os.environ["CHESTNYZNAK_TOKEN"] = new_token
-            # Сохраняем время обновления токена
-            ts_path = SCRIPT_DIR / ".token_timestamp"
-            ts_path.write_text(str(time.time()), "utf-8")
+            # Сохраняем срок действия токена
+            expires_at = self._get_token_expiry(new_token)
+            exp_path = SCRIPT_DIR / ".token_expires"
+            if expires_at is not None:
+                exp_path.write_text(str(expires_at), "utf-8")
+            else:
+                # Для UUID-токенов: оценка ~10 часов по документации
+                exp_path.write_text(str(time.time() + 36000), "utf-8")
             self._update_token_status(new_token)
             log_to_gui("🔑 Токен сохранён в .env", "success")
             dlg.destroy()
@@ -757,30 +777,273 @@ class App:
                command=dlg.destroy).pack(side="left", padx=8)
 
     def _update_token_status(self, token: str) -> None:
-        """Обновляет индикатор статуса токена с проверкой срока давности."""
-        if token:
-            # Проверяем время последнего обновления
-            ts_path = SCRIPT_DIR / ".token_timestamp"
-            if ts_path.exists():
+        """Обновляет индикатор статуса токена с проверкой срока действия."""
+        if not token:
+            self.token_status_label.config(text="🔑 True API: не настроен", fg=COLOR_LOG_WARN)
+            return
+
+        # Определяем срок действия токена
+        expires_at = self._get_token_expiry(token)
+        now = time.time()
+
+        if expires_at is not None:
+            remaining_h = (expires_at - now) / 3600
+            remaining_min = (expires_at - now) / 60
+            if remaining_min <= 0:
+                self.token_status_label.config(
+                    text=f"🔑 Токен: ❌ просрочен",
+                    fg=COLOR_LOG_ERROR
+                )
+                log_to_gui("❌ Токен просрочен. Получите новый через «Настройки → Получить токен через УКЭП».", "error")
+            elif remaining_h < 1:
+                self.token_status_label.config(
+                    text=f"🔑 Токен: ⚠ {remaining_min:.0f} мин",
+                    fg=COLOR_LOG_WARN
+                )
+                log_to_gui(f"⚠ Токен истекает через {remaining_min:.0f} мин. Обновите его.", "warn")
+            else:
+                exp_str = datetime.fromtimestamp(expires_at, tz=timezone(timedelta(hours=3))).strftime("%H:%M")
+                self.token_status_label.config(
+                    text=f"🔑 Токен: ✓ до {exp_str} МСК",
+                    fg=COLOR_LOG_SUCCESS
+                )
+        else:
+            # Не удалось определить срок из токена — читаем из файла
+            exp_path = SCRIPT_DIR / ".token_expires"
+            if exp_path.exists():
                 try:
-                    saved_ts = float(ts_path.read_text("utf-8").strip())
-                    age_hours = (time.time() - saved_ts) / 3600
-                    if age_hours >= 8:
+                    expires_ts = float(exp_path.read_text("utf-8").strip())
+                    remaining_h = (expires_ts - now) / 3600
+                    remaining_min = (expires_ts - now) / 60
+                    if remaining_min <= 0:
                         self.token_status_label.config(
-                            text=f"🔑 True API: ⚠ возможно просрочен ({age_hours:.0f} ч)",
+                            text=f"🔑 Токен: ❌ просрочен",
+                            fg=COLOR_LOG_ERROR
+                        )
+                        log_to_gui("❌ Токен просрочен. Получите новый через «Настройки → Получить токен через УКЭП».", "error")
+                    elif remaining_h < 1:
+                        self.token_status_label.config(
+                            text=f"🔑 Токен: ⚠ {remaining_min:.0f} мин",
                             fg=COLOR_LOG_WARN
                         )
-                        log_to_gui(f"⚠ Токен был сохранён {age_hours:.0f} ч назад — возможно, просрочен. Обновите в «Настройки → Токен».", "warn")
+                        log_to_gui(f"⚠ Токен истекает через {remaining_min:.0f} мин.", "warn")
                     else:
-                        self.token_status_label.config(text="🔑 True API: ✓", fg=COLOR_LOG_SUCCESS)
+                        exp_str = datetime.fromtimestamp(expires_ts, tz=timezone(timedelta(hours=3))).strftime("%H:%M")
+                        self.token_status_label.config(
+                            text=f"🔑 Токен: ✓ до {exp_str} МСК",
+                            fg=COLOR_LOG_SUCCESS
+                        )
                 except (ValueError, OSError):
                     self.token_status_label.config(text="🔑 True API: ✓", fg=COLOR_LOG_SUCCESS)
             else:
-                # Токен есть, но метки времени нет — ставим сейчас
-                ts_path.write_text(str(time.time()), "utf-8")
+                # Нет информации о сроке — просто показываем ✓
                 self.token_status_label.config(text="🔑 True API: ✓", fg=COLOR_LOG_SUCCESS)
-        else:
-            self.token_status_label.config(text="🔑 True API: не настроен", fg=COLOR_LOG_WARN)
+
+    @staticmethod
+    def _get_token_expiry(token: str) -> float | None:
+        """
+        Извлекает время истечения токена.
+        - JWT: декодирует payload, возвращает exp (unix timestamp)
+        - UUID-like: возвращает None (срок неизвестен)
+        """
+        try:
+            # JWT формат: header.payload.signature
+            parts = token.split(".")
+            if len(parts) == 3:
+                # Декодируем payload (добавляем padding если нужно)
+                payload_b64 = parts[1]
+                # Base64url → standard base64
+                payload_b64 += "=" * (4 - len(payload_b64) % 4)
+                import base64
+                payload_json = base64.urlsafe_b64decode(payload_b64)
+                payload = json.loads(payload_json)
+                exp = payload.get("exp")
+                if exp is not None:
+                    return float(exp)
+        except Exception:
+            pass
+
+        # UUID-подобный токен — срок неизвестен
+        return None
+
+    def _open_ukep_dialog(self) -> None:
+        """Диалог получения токена через УКЭП (электронная подпись)."""
+        dlg = Toplevel(self.root)
+        dlg.title("Получить токен через УКЭП")
+        dlg.geometry("600x500")
+        dlg.configure(bg=COLOR_FRAME_BG)
+        dlg.resizable(True, True)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        # Заголовок
+        Label(dlg, text="🔐 Авторизация через УКЭП",
+              font=("Segoe UI", 13, "bold"), bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG).pack(pady=(16, 4))
+        Label(dlg,
+              text="Подключите USB-токен (RuToken) и выберите сертификат.\n"
+                   "Токен будет получен автоматически и сохранён в настройки.",
+              font=("Segoe UI", 9), bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO,
+              wraplength=560, justify="center").pack(pady=(0, 12))
+
+        # Список сертификатов
+        certs_frame = Frame(dlg, bg=COLOR_FRAME_BG)
+        certs_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        Label(certs_frame, text="Сертификаты УКЭП:", font=("Segoe UI", 10),
+              bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG).pack(anchor="w", pady=(0, 4))
+
+        certs_listbox_frame = Frame(certs_frame, bg=COLOR_LOG_BG)
+        certs_listbox_frame.pack(fill="both", expand=True)
+
+        certs_listbox = Listbox(certs_listbox_frame, font=("Cascadia Code", 9),
+                                 bg=COLOR_LOG_BG, fg=COLOR_LOG_FG,
+                                 selectbackground=COLOR_BUTTON_ACCENT,
+                                 selectforeground="#1e1e2e",
+                                 relief="flat", height=6)
+        certs_scrollbar = Scrollbar(certs_listbox_frame, orient=VERTICAL,
+                                     command=certs_listbox.yview)
+        certs_listbox.config(yscrollcommand=certs_scrollbar.set)
+        certs_listbox.pack(side="left", fill="both", expand=True)
+        certs_scrollbar.pack(side="right", fill="y")
+
+        # Загрузка сертификатов
+        certs_data: list[dict] = []
+
+        def load_certs() -> None:
+            """Загружает список сертификатов в Listbox."""
+            certs_listbox.delete(0, END)
+            certs_data.clear()
+            try:
+                certs = list_certificates()
+                if not certs:
+                    certs_listbox.insert(END, "  Сертификаты не найдены.")
+                    certs_listbox.insert(END, "  Убедитесь, что КриптоПро CSP установлен")
+                    certs_listbox.insert(END, "  и УКЭП (RuToken) подключён.")
+                else:
+                    for cert in certs:
+                        subject = cert.get("subject", "Неизвестный")
+                        inn = cert.get("inn", "")
+                        thumbprint = cert.get("thumbprint", "")
+                        display = f"  {subject}"
+                        if inn:
+                            display += f" (ИНН: {inn})"
+                        certs_listbox.insert(END, display)
+                        certs_data.append(cert)
+            except Exception as e:
+                certs_listbox.insert(END, f"  Ошибка: {e}")
+
+        # Кнопка обновления сертификатов
+        refresh_frame = Frame(dlg, bg=COLOR_FRAME_BG)
+        refresh_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        Button(refresh_frame, text="🔄 Обновить список",
+               font=("Segoe UI", 9), bg=COLOR_BUTTON_BG, fg=COLOR_BUTTON_FG,
+               activebackground=COLOR_BUTTON_ACTIVE_BG, activeforeground=COLOR_BUTTON_FG,
+               relief="flat", padx=12, pady=4,
+               command=load_certs).pack(side="left")
+
+        # Статус
+        status_var = StringVar(value="")
+
+        status_label = Label(refresh_frame, textvariable=status_var,
+                             font=("Segoe UI", 9), bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO)
+        status_label.pack(side="right", padx=4)
+
+        # Метод авторизации: JWT через УКЭП
+        method_label_frame = Frame(dlg, bg=COLOR_FRAME_BG)
+        method_label_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+        Label(method_label_frame, text="Метод: JWT через УКЭП",
+              font=("Segoe UI", 10), bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO).pack(anchor="w")
+
+        # Кнопки действия
+        btn_frame = Frame(dlg, bg=COLOR_FRAME_BG)
+        btn_frame.pack(pady=(0, 16))
+
+        def do_auth() -> None:
+            """Запускает авторизацию через УКЭП в фоновом потоке."""
+            # Определяем thumbprint выбранного сертификата
+            thumbprint = ""
+            sel = certs_listbox.curselection()
+            if sel and sel[0] < len(certs_data):
+                thumbprint = certs_data[sel[0]].get("thumbprint", "")
+
+            status_var.set("⏳ Авторизация...")
+            dlg_btn_auth.config(state=DISABLED)
+
+            def worker() -> None:
+                success, result = auth_jwt(thumbprint)
+
+                def on_done() -> None:
+                    dlg_btn_auth.config(state=NORMAL)
+                    if success:
+                        # Сохраняем токен
+                        new_token = result
+                        env_path = SCRIPT_DIR / ".env"
+                        lines = []
+                        found = False
+                        if env_path.exists():
+                            for line in env_path.read_text("utf-8").splitlines():
+                                if line.startswith("CHESTNYZNAK_TOKEN="):
+                                    lines.append(f"CHESTNYZNAK_TOKEN={new_token}")
+                                    found = True
+                                else:
+                                    lines.append(line)
+                        if not found:
+                            lines.append(f"CHESTNYZNAK_TOKEN={new_token}")
+                        # Сохраняем ИНН из сертификата (для автоподстановки)
+                        inn_from_cert = ""
+                        if sel and sel[0] < len(certs_data):
+                            inn_from_cert = certs_data[sel[0]].get("inn", "")
+                        inn_lines = [l for l in lines if not l.startswith("CHESTNYZNAK_INN=")]
+                        if inn_from_cert:
+                            inn_lines.append(f"CHESTNYZNAK_INN={inn_from_cert}")
+                        env_path.write_text("\n".join(inn_lines) + "\n", "utf-8")
+
+                        os.environ["CHESTNYZNAK_TOKEN"] = new_token
+                        if inn_from_cert:
+                            os.environ["CHESTNYZNAK_INN"] = inn_from_cert
+                        # Сохраняем срок действия токена
+                        expires_at = self._get_token_expiry(new_token)
+                        exp_path = SCRIPT_DIR / ".token_expires"
+                        if expires_at is not None:
+                            exp_path.write_text(str(expires_at), "utf-8")
+                        else:
+                            exp_path.write_text(str(time.time() + 36000), "utf-8")
+                        self._update_token_status(new_token)
+
+                        token_preview = new_token[:20] + "..." if len(new_token) > 20 else new_token
+                        status_var.set(f"✅ Токен получен: {token_preview}")
+                        log_to_gui("🔐 JWT-токен получен через УКЭП", "success")
+                        messagebox.showinfo("Токен получен",
+                                            f"JWT-токен успешно получен и сохранён!",
+                                            parent=dlg)
+                        dlg.destroy()
+                    else:
+                        status_var.set("❌ Ошибка")
+                        messagebox.showerror("Ошибка авторизации", result, parent=dlg)
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        dlg_btn_auth = Button(btn_frame, text="🔐 Получить токен",
+                               font=("Segoe UI", 11, "bold"),
+                               bg=COLOR_BUTTON_ACCENT, fg="#1e1e2e",
+                               activebackground=COLOR_BUTTON_ACCENT_HOVER, activeforeground="#1e1e2e",
+                               relief="flat", padx=20, pady=8,
+                               command=do_auth)
+        dlg_btn_auth.pack(side="left", padx=8)
+
+        Button(btn_frame, text="Отмена",
+               font=("Segoe UI", 10),
+               bg=COLOR_BUTTON_BG, fg=COLOR_BUTTON_FG,
+               activebackground=COLOR_BUTTON_ACTIVE_BG, activeforeground=COLOR_BUTTON_FG,
+               relief="flat", padx=20, pady=8,
+               command=dlg.destroy).pack(side="left", padx=8)
+
+        # Загружаем сертификаты при открытии
+        load_certs()
 
     def _open_help(self) -> None:
         """Показывает инструкцию."""

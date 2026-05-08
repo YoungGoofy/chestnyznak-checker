@@ -10,25 +10,26 @@
 ```
 chestnyznak_checker/
 ├── check_codes.py            # CLI + бизнес-логика: HTTP, парсинг, Excel
-├── gui_app.py                # GUI (tkinter): импортирует check_codes + updater
-├── updater.py                # Автообновление через GitHub Releases
+├── crypto_auth.py             # Авторизация через УКЭП (КриптоПро CSP)
+├── gui_app.py                 # GUI (tkinter): импортирует check_codes + updater + crypto_auth
+├── updater.py                 # Автообновление через GitHub Releases
 ├── .github/
 │   └── workflows/
-│       └── build.yml         # GitHub Actions: автосборка .exe при пуше тега v*
-├── requirements.txt          # openpyxl, python-dotenv
-├── build.bat                 # Сборка .exe на Windows (PyInstaller)
-├── setup.bat                 # Создание .venv + установка зависимостей
-├── run.bat                   # Запуск GUI из .venv на Windows
-├── run_nix.sh                # Запуск GUI на NixOS
-├── flake.nix                 # nix-shell для NixOS (flakes)
-├── shell.nix                 # nix-shell без flakes
-├── .gitignore                # исключает .env, __pycache__, .venv, dist, build
-├── README.md                 # Инструкция для пользователя
-└── CLAUDE.md                 # этот файл
+│       └── build.yml          # GitHub Actions: автосборка .exe при пуше тега v*
+├── requirements.txt           # openpyxl, python-dotenv
+├── build.bat                  # Сборка .exe на Windows (PyInstaller)
+├── setup.bat                  # Создание .venv + установка зависимостей
+├── run.bat                    # Запуск GUI из .venv на Windows
+├── run_nix.sh                 # Запуск GUI на NixOS
+├── flake.nix                  # nix-shell для NixOS (flakes)
+├── shell.nix                  # nix-shell без flakes
+├── .gitignore                 # исключает .env, __pycache__, .venv, dist, build
+├── README.md                  # Инструкция для пользователя
+└── CLAUDE.md                  # этот файл
 ```
 
 **Не в репозитории** (gitignore):
-- `.env` — токен ChZ (секрет)
+- `.env` — токен ChZ, ИНН (секрет)
 - `.token_timestamp` — unixtime последнего сохранения токена
 - `__pycache__/`, `.venv/`, `build/`, `dist/`, `*.spec`
 
@@ -139,6 +140,10 @@ from check_codes import (
     get_pg_from_public, parse_result, save_excel,
     EXCEL_HEADERS, load_env,
 )
+from crypto_auth import (
+    auth_united_token, auth_jwt, list_certificates,
+    set_log_fn as set_auth_log_fn,
+)
 from updater import (
     check_for_update as _check_update,
     perform_update as _perform_update,
@@ -152,12 +157,40 @@ from updater import (
 - `_start_public_thread()` — запуск проверки через публичный API (fallback)
 - `_stop_processing()` — установка флага `_stop_requested`
 - `_quick_auth_check(token, pg_code)` — тестовый запрос для проверки токена
-- `_open_token_dialog()` — диалог ввода токена
+- `_open_token_dialog()` — ручной ввод токена
+- `_open_ukep_dialog()` — авторизация через УКЭП (сертификат + ИНН → токен)
 - `_auto_check_updates()` — автопроверка обновлений при старте (тихая)
 - `_run_update_check()` — ручная проверка обновлений из меню (с диалогом)
 - `_on_update_button()` — обработчик нажатия кнопки-индикатора обновлений
 - `_check_updates()` — делегирует в `_run_update_check()`
 - `_apply_update(release_info)` — скачивание и подмена .exe
+
+## Модуль авторизации через УКЭП (crypto_auth.py)
+
+### Методы авторизации
+1. **United Token** (рекомендуемый) — один шаг: подпись ИНН → POST `/auth/simpleSignIn` с `unitedToken=true`
+2. **JWT flow** (устаревший) — два шага: GET `/auth/key` → подпись challenge → POST `/auth/simpleSignIn`
+
+⚠ JWT-токены будут отключены в марте 2026 — используйте United Token.
+
+### Ключевые функции
+- `auth_united_token(inn, thumbprint="")` → `(bool, str)` — United Token авторизация
+- `auth_jwt(thumbprint="")` → `(bool, str)` — JWT авторизация (2 шага)
+- `list_certificates()` → `list[dict]` — список сертификатов УКЭП (COM / cryptcp)
+- `sign_data(data, thumbprint="")` → `bytes | None` — подпись данных УКЭП (attached CMS)
+- `set_log_fn(fn)` — подключить функцию логирования (для GUI)
+
+### Подпись через УКЭП
+- **Windows**: КриптоПро CSP COM-объекты (`win32com.client`) → fallback `cryptcp.exe`
+- **Linux**: `cryptcp` CLI
+- Подпись **присоединённая** (attached CMS), кодируется в base64
+- ИНН для United Token — 10 или 12 цифр
+
+### Диалог УКЭП в GUI
+- Меню: Настройки → «🔐 Получить токен через УКЭП»
+- Поля: ИНН (автоподстановка из .env/сертификата), список сертификатов, метод (United/JWT)
+- Кнопка «Получить токен» → фоновый поток → сохранение в .env
+- Сохраняет ИНН в `.env` (`CHESTNYZNAK_INN`) для автоподстановки
 
 ## Модуль обновлений (updater.py)
 
