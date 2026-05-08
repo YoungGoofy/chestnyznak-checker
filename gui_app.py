@@ -71,7 +71,7 @@ from updater import (
 # Константы
 # ══════════════════════════════════════════════════════════════════════
 APP_TITLE = "CISChecker — Проверка кодов маркировки"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 WINDOW_WIDTH = 850
 WINDOW_HEIGHT = 620
 LOG_MAX_LINES = 500
