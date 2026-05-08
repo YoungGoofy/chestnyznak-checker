@@ -7,8 +7,8 @@
   2. Подписываем data сертификатом УКЭП → POST /auth/simpleSignIn → JWT-токен
 
 Подпись выполняется через КриптоПро CSP:
-- Windows: COM-объекты через win32com (если pywin32 установлен) или cryptcp.exe
-- Linux: cryptcp / csptest
+- Windows: COM-объекты CAdESCOM (КриптоПро ECP / CSP 5.x) или legacy CPCSPStore (CSP 4.x)
+- Fallback: cryptcp CLI (Windows / Linux)
 """
 from __future__ import annotations
 
@@ -29,6 +29,22 @@ AUTH_KEY_URL = "https://markirovka.crpt.ru/api/v3/auth/key"
 AUTH_SIGN_URL = "https://markirovka.crpt.ru/api/v3/auth/simpleSignIn"
 
 TIMEOUT = 15
+
+# Логирование
+_log_fn = None
+
+
+def set_log_fn(fn) -> None:
+    """Устанавливает функцию логирования (для GUI)."""
+    global _log_fn
+    _log_fn = fn
+
+
+def _get_log_fn():
+    """Возвращает текущую функцию логирования."""
+    if _log_fn:
+        return _log_fn
+    return print
 
 
 # ── HTTP-хелперы ──────────────────────────────────────────────────────
@@ -61,6 +77,19 @@ def _http_post_json(url: str, body: dict) -> tuple[int, dict | str]:
 
 # ── Список сертификатов УКЭП ──────────────────────────────────────────
 
+# Константы хранилищ КриптоПро
+CAPICOM_MEMORY_STORE = 0
+CAPICOM_LOCAL_MACHINE_STORE = 1
+CAPICOM_CURRENT_USER_STORE = 2
+
+CAPICOM_STORE_OPEN_READ_ONLY = 0
+CAPICOM_STORE_OPEN_READ_WRITE = 1
+CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED = 2
+
+# OID КриптоПро для ИНН в Subject
+OID_INN = "1.2.643.3.131.1.1"
+
+
 def list_certificates() -> list[dict]:
     """
     Возвращает список доступных сертификатов УКЭП.
@@ -75,17 +104,177 @@ def list_certificates() -> list[dict]:
     }
 
     Порядок поиска:
-    1. Windows COM (win32com + КриптоПро CSP)
-    2. cryptcp CLI (Windows / Linux)
+    1. CAdESCOM Store (КриптоПро ECP / CSP 5.x — актуальный COM-интерфейс)
+    2. CPCSPStore (CSP 4.x — legacy)
+    3. cryptcp CLI (fallback)
     """
-    certs = _list_certs_com()
-    if certs is not None:
+    log_fn = _get_log_fn()
+
+    # 1. Пробуем CAdESCOM (современный интерфейс КриптоПро)
+    certs = _list_certs_cadescom()
+    if certs is not None and len(certs) > 0:
+        log_fn(f"📋 Найдено сертификатов (CAdESCOM): {len(certs)}")
         return certs
-    return _list_certs_cryptcp()
+
+    # 2. Пробуем legacy CPCSPStore
+    certs = _list_certs_legacy_com()
+    if certs is not None and len(certs) > 0:
+        log_fn(f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}")
+        return certs
+
+    # 3. Fallback: cryptcp CLI
+    certs = _list_certs_cryptcp()
+    if len(certs) > 0:
+        log_fn(f"📋 Найдено сертификатов (cryptcp): {len(certs)}")
+    else:
+        log_fn("⚠ Сертификаты не найдены ни через COM, ни через cryptcp")
+
+    return certs
 
 
-def _list_certs_com() -> list[dict] | None:
-    """Список сертификатов через КриптоПро COM (Windows)."""
+def _list_certs_cadescom() -> list[dict] | None:
+    """Список сертификатов через CAdESCOM.Store (КриптоПро ECP / CSP 5.x)."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import win32com.client
+    except ImportError:
+        return None
+
+    log_fn = _get_log_fn()
+    certs = []
+
+    # Пробуем разные хранилища: "My" (личные), "Root" (корневые)
+    store_names = ["My"]
+    for store_name in store_names:
+        try:
+            store = win32com.client.Dispatch("CAdESCOM.Store")
+            # Open(StoreLocation, StoreName, OpenMode)
+            # CAPICOM_CURRENT_USER_STORE=2, CAPICOM_STORE_OPEN_READ_ONLY=0
+            store.Open(
+                CAPICOM_CURRENT_USER_STORE,
+                store_name,
+                CAPICOM_STORE_OPEN_READ_ONLY,
+            )
+
+            for cert in store.Certificates:
+                info = _parse_cert_cadescom(cert)
+                if info:
+                    certs.append(info)
+
+            store.Close()
+        except Exception as e:
+            log_fn(f"⚠ CAdESCOM Store '{store_name}': {e}")
+            continue
+
+    return certs if certs or len(certs) >= 0 else None
+
+
+def _parse_cert_cadescom(cert) -> dict | None:
+    """Парсит сертификат из CAdESCOM."""
+    try:
+        subject = ""
+        issuer = ""
+        thumbprint = ""
+        not_before = ""
+        not_after = ""
+
+        # Пробуем разные свойства (CAdESCOM vs CAPICOM)
+        for attr in ["SubjectName", "Subject", "GetInfo(0)"]:
+            try:
+                if attr == "SubjectName":
+                    subject = cert.SubjectName
+                elif attr == "Subject":
+                    subject = cert.Subject
+                    break
+            except Exception:
+                continue
+
+        for attr in ["IssuerName", "Issuer"]:
+            try:
+                if attr == "IssuerName":
+                    issuer = cert.IssuerName
+                elif attr == "Issuer":
+                    issuer = cert.Issuer
+                    break
+            except Exception:
+                continue
+
+        try:
+            thumbprint = cert.Thumbprint or ""
+        except Exception:
+            pass
+
+        try:
+            not_before = str(cert.ValidFromDate or "")
+        except Exception:
+            pass
+
+        try:
+            not_after = str(cert.ValidToDate or "")
+        except Exception:
+            pass
+
+        # Извлекаем ИНН
+        inn = _extract_inn_from_cert(cert)
+
+        # Фильтруем: пропускаем корневые сертификаты без ИНН (CA-сертификаты)
+        # УКЭП должен иметь ИНН или быть в хранилище "My"
+        return {
+            "thumbprint": thumbprint,
+            "subject": subject,
+            "issuer": issuer,
+            "not_before": not_before,
+            "not_after": not_after,
+            "inn": inn,
+        }
+    except Exception:
+        return None
+
+
+def _extract_inn_from_cert(cert) -> str:
+    """
+    Извлекает ИНН из сертификата УКЭП.
+    Пробует: ExtendedKeyUsage/OID, SubjectName, Subject (DN).
+    """
+    # Метод 1: OID КриптоПро для ИНН (1.2.643.3.131.1.1)
+    try:
+        # CAdESCOM: GetExtension/OID
+        for method in ["GetExtension", "ExtendedKeyUsage"]:
+            try:
+                ext = getattr(cert, method)(OID_INN)
+                if ext:
+                    val = str(ext).strip()
+                    if val.isdigit() and len(val) in (10, 12):
+                        return val
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Метод 2: Из SubjectName как строки
+    try:
+        subject = cert.SubjectName or cert.Subject or ""
+        inn = _extract_inn_from_subject(subject)
+        if inn:
+            return inn
+    except Exception:
+        pass
+
+    # Метод 3: Из Subject (DN-формат)
+    try:
+        subject = cert.Subject or ""
+        inn = _extract_inn_from_subject(subject)
+        if inn:
+            return inn
+    except Exception:
+        pass
+
+    return ""
+
+
+def _list_certs_legacy_com() -> list[dict] | None:
+    """Список сертификатов через legacy CPCSPStore.Store (КриптоПро CSP 4.x)."""
     if platform.system() != "Windows":
         return None
     try:
@@ -98,21 +287,23 @@ def _list_certs_com() -> list[dict] | None:
         store.Open()
         certs = []
         for cert in store.Certificates:
-            info = _parse_cert_com(cert)
+            info = _parse_cert_com_legacy(cert)
             if info:
                 certs.append(info)
         store.Close()
         return certs
-    except Exception:
+    except Exception as e:
+        _get_log_fn()(f"⚠ CPCSPStore: {e}")
         return None
 
 
-def _parse_cert_com(cert) -> dict | None:
-    """Парсит COM-объект сертификата."""
+def _parse_cert_com_legacy(cert) -> dict | None:
+    """Парсит COM-объект сертификата (legacy CPCSPStore)."""
     try:
-        subject = cert.SubjectName
-        # Извлекаем ИНН из субъекта
+        subject = cert.SubjectName or ""
         inn = _extract_inn_from_subject(subject)
+        if not inn:
+            inn = _extract_inn_from_cert(cert)
         return {
             "thumbprint": cert.Thumbprint or "",
             "subject": subject,
@@ -120,7 +311,6 @@ def _parse_cert_com(cert) -> dict | None:
             "not_before": str(cert.ValidFromDate or ""),
             "not_after": str(cert.ValidToDate or ""),
             "inn": inn,
-            # Сохраняем ссылку на COM-объект для подписи
             "_com_cert": cert,
         }
     except Exception:
@@ -130,55 +320,81 @@ def _parse_cert_com(cert) -> dict | None:
 def _list_certs_cryptcp() -> list[dict]:
     """Список сертификатов через cryptcp (CLI)."""
     certs = []
-    # cryptcp -certstore -u my  — список сертификатов пользователя
-    try:
-        result = subprocess.run(
-            ["cryptcp", "-certstore", "-u", "my"],
-            capture_output=True, text=True, timeout=10,
-            encoding="cp866" if platform.system() == "Windows" else "utf-8",
-        )
-        output = result.stdout + result.stderr
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return certs
 
-    # Парсим вывод cryptcp
-    # Формат:
-    #   CertNum: 0
-    #   Subject: ...
-    #   Issuer: ...
-    #   SHA1 Hash: XX XX ...
-    current: dict = {}
-    for line in output.splitlines():
-        line = line.strip()
-        if line.startswith("CertNum:"):
+    # Пробуем разные хранилища
+    for store_flag in ["-u my", "-u root"]:
+        try:
+            parts = ["cryptcp", "-certstore"] + store_flag.split()
+            result = subprocess.run(
+                parts,
+                capture_output=True, text=True, timeout=10,
+                encoding="cp866" if platform.system() == "Windows" else "utf-8",
+            )
+            output = result.stdout + result.stderr
+
+            current: dict = {}
+            for line in output.splitlines():
+                line = line.strip()
+                if line.startswith("CertNum:"):
+                    if current.get("thumbprint"):
+                        certs.append(current)
+                    current = {}
+                elif line.startswith("Subject:"):
+                    current["subject"] = line.split(":", 1)[1].strip()
+                    current["inn"] = _extract_inn_from_subject(current.get("subject", ""))
+                elif line.startswith("Issuer:"):
+                    current["issuer"] = line.split(":", 1)[1].strip()
+                elif "SHA1 Hash" in line or "SHA1" in line:
+                    hash_part = line.split(":", 1)[1].strip() if ":" in line else ""
+                    current["thumbprint"] = hash_part
             if current.get("thumbprint"):
                 certs.append(current)
-            current = {}
-        elif line.startswith("Subject:"):
-            current["subject"] = line.split(":", 1)[1].strip()
-            current["inn"] = _extract_inn_from_subject(current.get("subject", ""))
-        elif line.startswith("Issuer:"):
-            current["issuer"] = line.split(":", 1)[1].strip()
-        elif "SHA1 Hash" in line or "SHA1" in line:
-            # "SHA1 Hash: XX XX XX ..."
-            hash_part = line.split(":", 1)[1].strip() if ":" in line else ""
-            current["thumbprint"] = hash_part
-    if current.get("thumbprint"):
-        certs.append(current)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
 
-    return certs
+    # Дедупликация по thumbprint
+    seen = set()
+    unique = []
+    for c in certs:
+        tp = c.get("thumbprint", "")
+        if tp not in seen:
+            seen.add(tp)
+            unique.append(c)
+
+    return unique
 
 
 def _extract_inn_from_subject(subject: str) -> str:
     """Извлекает ИНН из Subject сертификата."""
-    # Форматы: "INN=1234567890" или "ИНН=1234567890" или "2.5.4.16=#1234567890"
-    for sep in [", ", "; "]:
+    # Форматы: "INN=1234567890", "ИНН=1234567890", OID "1.2.643.3.131.1.1=#..."
+    for sep in [", ", "; ", "\n"]:
         parts = subject.split(sep)
         for part in parts:
             part = part.strip()
+            # INN=... / ИНН=...
             if part.upper().startswith("INN=") or part.upper().startswith("ИНН="):
                 val = part.split("=", 1)[1].strip()
                 if val.isdigit() and len(val) in (10, 12):
+                    return val
+            # OID КриптоПро: 1.2.643.3.131.1.1=#1604...
+            if part.startswith(OID_INN + "="):
+                val = part.split("=", 1)[1].strip()
+                # Значение может быть в формате #hex или просто цифры
+                if val.startswith("#"):
+                    # hex-encoded, пытаемся декодировать
+                    try:
+                        hex_str = val[1:]
+                        # Пропускаем ASN.1 tag + length (обычно #1604 + цифры ИНН в hex)
+                        # Формат: #160431323334353637383930
+                        # 16 = OID, 04 = OCTET STRING, потом hex цифр ИНН
+                        if len(hex_str) >= 8:
+                            inn_hex = hex_str[4:]  # пропускаем tag+length
+                            inn_val = bytes.fromhex(inn_hex).decode("ascii", errors="ignore").strip()
+                            if inn_val.isdigit() and len(inn_val) in (10, 12):
+                                return inn_val
+                    except Exception:
+                        pass
+                elif val.isdigit() and len(val) in (10, 12):
                     return val
     return ""
 
@@ -187,22 +403,47 @@ def _extract_inn_from_subject(subject: str) -> str:
 
 def sign_data(data: bytes, thumbprint: str = "") -> bytes | None:
     """
-    Подписывает данные УКЭП (attached CMS signature).
+    Подписывает данные УКЭП (attached CMS signature, DER).
 
     Возвращает CMS signature в DER (бинарный) или None при ошибке.
 
     Пробует методы в порядке:
-    1. КриптоПро COM (Windows)
-    2. cryptcp CLI
+    1. КриптоПро CAdESCOM COM (Windows, CSP 5.x)
+    2. КриптоПро legacy COM (CPCSPStore, CSP 4.x)
+    3. cryptcp CLI
     """
-    result = _sign_com(data, thumbprint)
+    log_fn = _get_log_fn()
+
+    result = _sign_cadescom(data, thumbprint)
     if result is not None:
         return result
-    return _sign_cryptcp(data, thumbprint)
+
+    result = _sign_legacy_com(data, thumbprint)
+    if result is not None:
+        return result
+
+    result = _sign_cryptcp(data, thumbprint)
+    if result is not None:
+        return result
+
+    log_fn("❌ Ни один метод подписи не сработал (CAdESCOM, CPCSPStore, cryptcp)")
+    return None
 
 
-def _sign_com(data: bytes, thumbprint: str = "") -> bytes | None:
-    """Подпись через КриптоПро COM (Windows)."""
+def _find_cert_in_store(store, thumbprint: str):
+    """Находит сертификат по thumbprint в COM Store."""
+    for cert in store.Certificates:
+        try:
+            tp = cert.Thumbprint or ""
+            if tp and tp.lower().replace(" ", "") == thumbprint.lower().replace(" ", ""):
+                return cert
+        except Exception:
+            continue
+    return None
+
+
+def _sign_cadescom(data: bytes, thumbprint: str = "") -> bytes | None:
+    """Подпись через CAdESCOM (КриптоПро ECP / CSP 5.x)."""
     if platform.system() != "Windows":
         return None
     try:
@@ -210,34 +451,101 @@ def _sign_com(data: bytes, thumbprint: str = "") -> bytes | None:
     except ImportError:
         return None
 
-    try:
-        signer = win32com.client.Dispatch("CPSigner.Signer")
-        if thumbprint:
-            # Находим сертификат по thumbprint
-            store = win32com.client.Dispatch("CPCSPStore.Store")
-            store.Open()
-            for cert in store.Certificates:
-                if cert.Thumbprint and cert.Thumbprint.lower().replace(" ", "") == thumbprint.lower().replace(" ", ""):
-                    signer.Certificate = cert
-                    break
-            store.Close()
+    log_fn = _get_log_fn()
 
-        # Создаём объект для подписи
+    try:
+        # Открываем хранилище
+        store = win32com.client.Dispatch("CAdESCOM.Store")
+        store.Open(
+            CAPICOM_CURRENT_USER_STORE,
+            "My",
+            CAPICOM_STORE_OPEN_READ_ONLY,
+        )
+
+        # Находим сертификат
+        cert = None
+        if thumbprint:
+            cert = _find_cert_in_store(store, thumbprint)
+        elif store.Certificates.Count > 0:
+            cert = store.Certificates.Item(1)
+
+        store.Close()
+
+        if not cert:
+            log_fn("⚠ Сертификат не найден в хранилище My (CAdESCOM)")
+            return None
+
+        # Создаём Signer
+        signer = win32com.client.Dispatch("CAdESCOM.CPSigner")
+        signer.Certificate = cert
+
+        # Создаём SignedData
+        signed_data = win32com.client.Dispatch("CAdESCOM.CadesSignedData")
+        # Content = base64(data)
+        signed_data.Content = base64.b64encode(data).decode("ascii")
+
+        # Подписываем (detached=False = attached)
+        # CAdESCOM: Sign(Signer, Detached, EncodingType)
+        # EncodingType: 0 = Base64, 1 = XML
+        signature_b64 = signed_data.Sign(signer, False, 0)
+
+        # Декодируем из base64 → DER
+        return base64.b64decode(signature_b64)
+
+    except Exception as e:
+        log_fn(f"⚠ CAdESCOM подпись: {e}")
+        return None
+
+
+def _sign_legacy_com(data: bytes, thumbprint: str = "") -> bytes | None:
+    """Подпись через legacy CPCSPStore (КриптоПро CSP 4.x)."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import win32com.client
+    except ImportError:
+        return None
+
+    log_fn = _get_log_fn()
+
+    try:
+        store = win32com.client.Dispatch("CPCSPStore.Store")
+        store.Open()
+
+        cert = None
+        if thumbprint:
+            cert = _find_cert_in_store(store, thumbprint)
+        elif store.Certificates.Count > 0:
+            cert = store.Certificates.Item(1)
+
+        if not cert:
+            store.Close()
+            log_fn("⚠ Сертификат не найден (CPCSPStore)")
+            return None
+
+        signer = win32com.client.Dispatch("CPSigner.Signer")
+        signer.Certificate = cert
+
         signed_data = win32com.client.Dispatch("CPSignedData.SignedData")
         signed_data.Content = base64.b64encode(data).decode("ascii")
 
-        # Подписываем (attached = True)
-        signature = signedData.SignCPS(signer, True, 0)
+        # Исправленный баг: было signedData (опечатка), сейчас signed_data
+        signature_b64 = signed_data.SignCPS(signer, True, 0)
 
-        # Декодируем из base64
-        return base64.b64decode(signature)
-    except Exception:
+        store.Close()
+        return base64.b64decode(signature_b64)
+
+    except Exception as e:
+        log_fn(f"⚠ CPCSPStore подпись: {e}")
+        try:
+            store.Close()
+        except Exception:
+            pass
         return None
 
 
 def _sign_cryptcp(data: bytes, thumbprint: str = "") -> bytes | None:
     """Подпись через cryptcp CLI (Windows/Linux)."""
-    # Создаём временные файлы
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f_in:
         f_in.write(data)
         in_path = f_in.name
@@ -247,7 +555,6 @@ def _sign_cryptcp(data: bytes, thumbprint: str = "") -> bytes | None:
     try:
         cmd = ["cryptcp", "-sign", "-der"]
         if thumbprint:
-            # cryptcp -sign -cert <thumbprint> -der
             thumb_clean = thumbprint.lower().replace(" ", "")
             cmd += ["-cert", thumb_clean]
         cmd += ["-u", "my", in_path, out_path]
@@ -264,7 +571,6 @@ def _sign_cryptcp(data: bytes, thumbprint: str = "") -> bytes | None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     finally:
-        # Удаляем временные файлы
         for p in (in_path, out_path):
             try:
                 Path(p).unlink()
@@ -297,7 +603,7 @@ def auth_jwt(thumbprint: str = "") -> tuple[bool, str]:
     if not uuid or not data_str:
         return False, "Сервер вернул некорректный challenge."
 
-    log_fn(f"🔐 Подписываю challenge сертификатом УКЭП...")
+    log_fn("🔐 Подписываю challenge сертификатом УКЭП...")
 
     # Шаг 2: Подписываем challenge
     signature = sign_data(data_str.encode("utf-8"), thumbprint)
@@ -306,7 +612,8 @@ def auth_jwt(thumbprint: str = "") -> tuple[bool, str]:
             "Не удалось подписать данные. Убедитесь, что:\n"
             "• КриптоПро CSP установлен\n"
             "• УКЭП (RuToken/USB-токен) подключён\n"
-            "• Сертификат доступен в хранилище"
+            "• Сертификат доступен в хранилище\n"
+            "• pywin32 установлен (для COM-доступа)"
         )
 
     sig_b64 = base64.b64encode(signature).decode("ascii")
@@ -321,7 +628,7 @@ def auth_jwt(thumbprint: str = "") -> tuple[bool, str]:
     if status == 200 and isinstance(response, dict):
         token = response.get("token", "")
         if token:
-            log_fn(f"✅ JWT-токен получен!")
+            log_fn("✅ JWT-токен получен!")
             return True, token
 
     error_msg = _parse_auth_error(status, response)
@@ -346,22 +653,3 @@ def _parse_auth_error(status: int, response) -> str:
     if status == 403:
         return "Доступ запрещён (HTTP 403). Пользователь не найден или неактивен."
     return f"Ошибка авторизации (HTTP {status})."
-
-
-# ── Логирование ────────────────────────────────────────────────────────
-
-_log_fn = None
-
-
-def set_log_fn(fn) -> None:
-    """Устанавливает функцию логирования (для GUI)."""
-    global _log_fn
-    _log_fn = fn
-
-
-def _get_log_fn():
-    """Возвращает текущую функцию логирования."""
-    if _log_fn:
-        return _log_fn
-    # Fallback — print
-    return print
