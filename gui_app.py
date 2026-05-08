@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GUI для проверки кодов маркировки «Честный Знак».
+GUI для проверки кодов маркировки (CISChecker).
 Tkinter — работает на Windows, Linux, NixOS без внешних зависимостей.
 """
 from __future__ import annotations
@@ -70,7 +70,7 @@ from updater import (
 # ══════════════════════════════════════════════════════════════════════
 # Константы
 # ══════════════════════════════════════════════════════════════════════
-APP_TITLE = "Честный Знак — Проверка кодов маркировки"
+APP_TITLE = "CISChecker — Проверка кодов маркировки"
 APP_VERSION = "1.2.0"
 WINDOW_WIDTH = 850
 WINDOW_HEIGHT = 620
@@ -244,7 +244,7 @@ class App:
         top_frame.pack(fill="x", side="top")
         top_frame.pack_propagate(False)
 
-        title_label = Label(top_frame, text="Проверка кодов маркировки «Честный Знак»",
+        title_label = Label(top_frame, text="Проверка кодов маркировки «CISChecker»",
                             font=("Segoe UI", 14, "bold"), bg=COLOR_HEADER_BG, fg=COLOR_BUTTON_FG)
         title_label.pack(side="left", padx=16, pady=12)
 
@@ -1250,7 +1250,7 @@ class App:
             f"Версия: {APP_VERSION}\n"
             f"Python + Tkinter\n\n"
             f"Использует публичный и True API\n"
-            f"системы маркировки «Честный Знак».\n\n"
+            f"системы маркировки «Честный Знак» (CISChecker).\n\n"
             f"Репозиторий: github.com/{GITHUB_REPO}\n"
             f"© 2026"
         )

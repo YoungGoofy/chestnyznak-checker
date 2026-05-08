@@ -1,4 +1,4 @@
-# CLAUDE.md — ChestnyZnakChecker
+# CLAUDE.md — CISChecker
 
 Проект для проверки кодов маркировки системы «Честный Знак» (CRPT) через публичный и закрытый (True) API с выгрузкой в Excel.
 
@@ -197,7 +197,7 @@ from updater import (
 ### Константы
 - `GITHUB_REPO = "YoungGoofy/chestnyznak-checker"`
 - `RELEASES_API = "https://api.github.com/repos/.../releases/latest"`
-- `EXE_NAME = "ChestnyZnakChecker.exe"`
+- `EXE_NAME = "CISChecker.exe"`
 
 ### Функции
 - `get_current_version()` → str — возвращает `APP_VERSION` из gui_app
@@ -235,7 +235,7 @@ python check_codes.py --true -f codes.txt -o result.xlsx
 python gui_app.py
 
 # GUI (Windows .exe)
-ChestnyZnakChecker.exe
+CISChecker.exe
 
 # NixOS GUI
 nix-shell -p python311 -p tk --run "source .venv/bin/activate && python gui_app.py"
@@ -246,7 +246,7 @@ nix-shell -p python311 -p tk --run "source .venv/bin/activate && python gui_app.
 ```bash
 # Вручную
 pip install pyinstaller
-pyinstaller --onefile --windowed --hidden-import openpyxl --name ChestnyZnakChecker gui_app.py
+pyinstaller --onefile --windowed --hidden-import openpyxl --name CISChecker gui_app.py
 
 # Через build.bat (Windows)
 build.bat
@@ -264,7 +264,7 @@ build.bat
 Срабатывает при пуше тега `v*` (напр. `v1.0`, `v1.1`):
 1. Запускается на `windows-latest`
 2. Ставит Python 3.11 + зависимости
-3. Собирает `ChestnyZnakChecker.exe` через PyInstaller
+3. Собирает `CISChecker.exe` через PyInstaller
 4. Создаёт GitHub Release с `.exe` файлом
 
 ### Как выпустить обновление

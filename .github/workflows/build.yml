@@ -29,10 +29,10 @@ jobs:
 
       - name: Build .exe
         run: |
-          pyinstaller --onefile --windowed --hidden-import openpyxl --name ChestnyZnakChecker gui_app.py
+          pyinstaller --onefile --windowed --hidden-import openpyxl --name CISChecker gui_app.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ChestnyZnakChecker.exe
+          files: dist/CISChecker.exe
           generate_release_notes: true

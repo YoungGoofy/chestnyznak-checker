@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Модуль автоматического обновления ChestnyZnakChecker.
+Модуль автоматического обновления CISChecker.
 
 Проверяет последний Release на GitHub, сравнивает версии,
 скачивает новый .exe, подменяет старый через .bat-скрипт и перезапускает.
@@ -28,7 +28,7 @@ from urllib.error import URLError, HTTPError
 
 GITHUB_REPO = "YoungGoofy/chestnyznak-checker"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-EXE_NAME = "ChestnyZnakChecker.exe"
+EXE_NAME = "CISChecker.exe"
 
 # Таймауты (секунды)
 CONNECT_TIMEOUT = 10
@@ -65,7 +65,7 @@ def fetch_latest_release() -> dict | None:
         {
             "tag": "v1.2",
             "version": "1.2",
-            "exe_url": "https://github.com/.../ChestnyZnakChecker.exe",
+            "exe_url": "https://github.com/.../CISChecker.exe",
             "exe_size": 12345678,
             "release_notes": "Описание релиза",
             "published_at": "2026-05-08T...",
@@ -73,7 +73,7 @@ def fetch_latest_release() -> dict | None:
     Или None, если не удалось получить.
     """
     try:
-        req = Request(RELEASES_API, headers={"User-Agent": "ChestnyZnakChecker"})
+        req = Request(RELEASES_API, headers={"User-Agent": "CISChecker"})
         with urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, HTTPError, json.JSONDecodeError, OSError) as e:
@@ -131,7 +131,7 @@ def download_exe(url: str, dest: Path, progress_fn=None) -> bool:
     Возвращает True при успехе.
     """
     try:
-        req = Request(url, headers={"User-Agent": "ChestnyZnakChecker"})
+        req = Request(url, headers={"User-Agent": "CISChecker"})
         with urlopen(req, timeout=READ_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             chunk_size = 65536
@@ -167,7 +167,7 @@ def create_updater_bat(old_exe: Path, new_exe: Path) -> Path:
     new_str = str(new_exe)
 
     bat_content = f"""@echo off
-echo Updating ChestnyZnakChecker...
+echo Updating CISChecker...
 echo Waiting for old process to exit...
 :wait_loop
 tasklist /fi "pid eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul

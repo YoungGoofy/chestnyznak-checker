@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ChestnyZnakChecker — запуск на NixOS
+# CISChecker — запуск на NixOS
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

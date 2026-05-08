@@ -1,8 +1,8 @@
 @echo off
-title ChestnyZnakChecker - Build
+title CISChecker - Build
 
 echo ================================================
-echo  ChestnyZnakChecker - Build .exe
+echo  CISChecker - Build .exe
 echo ================================================
 echo.
 
@@ -30,7 +30,7 @@ echo [3/4] Installing pyinstaller...
 .venv\Scripts\pip install pyinstaller --quiet
 
 echo [4/4] Building .exe...
-.venv\Scripts\pyinstaller --onefile --windowed --hidden-import openpyxl --name ChestnyZnakChecker gui_app.py
+.venv\Scripts\pyinstaller --onefile --windowed --hidden-import openpyxl --name CISChecker gui_app.py
 if errorlevel 1 (
     echo ERROR: Build failed.
     pause
@@ -41,7 +41,7 @@ echo.
 echo ================================================
 echo  DONE!
 echo.
-echo    dist\ChestnyZnakChecker.exe
+echo    dist\CISChecker.exe
 echo.
 echo  Put .env next to .exe (or set token via GUI).
 echo ================================================

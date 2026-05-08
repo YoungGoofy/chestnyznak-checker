@@ -1,5 +1,5 @@
 @echo off
-title ChestnyZnakChecker
+title CISChecker
 
 if not exist ".venv\Scripts\python.exe" (
     echo Virtual environment not found. Run setup.bat first.

@@ -1,8 +1,8 @@
 @echo off
-title ChestnyZnakChecker - Setup
+title CISChecker - Setup
 
 echo ================================================
-echo  ChestnyZnakChecker - Dev Setup
+echo  CISChecker - Dev Setup
 echo ================================================
 echo.
 
