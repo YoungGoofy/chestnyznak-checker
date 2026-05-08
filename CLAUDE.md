@@ -3,7 +3,7 @@
 Проект для проверки кодов маркировки системы «Честный Знак» (CRPT) через публичный и закрытый (True) API с выгрузкой в Excel.
 
 **Репозиторий:** https://github.com/YoungGoofy/chestnyznak-checker
-**Текущая версия:** `APP_VERSION = "1.1"` (в gui_app.py)
+**Текущая версия:** `APP_VERSION = "1.2.1"` (в gui_app.py)
 
 ## Структура
 
@@ -141,7 +141,7 @@ from check_codes import (
     EXCEL_HEADERS, load_env,
 )
 from crypto_auth import (
-    auth_united_token, auth_jwt, list_certificates,
+    auth_jwt, list_certificates,
     set_log_fn as set_auth_log_fn,
 )
 from updater import (
@@ -167,30 +167,41 @@ from updater import (
 
 ## Модуль авторизации через УКЭП (crypto_auth.py)
 
-### Методы авторизации
-1. **United Token** (рекомендуемый) — один шаг: подпись ИНН → POST `/auth/simpleSignIn` с `unitedToken=true`
-2. **JWT flow** (устаревший) — два шага: GET `/auth/key` → подпись challenge → POST `/auth/simpleSignIn`
+### Метод авторизации
+**JWT flow** (единственный метод) — два шага: GET `/auth/key` → подпись challenge → POST `/auth/simpleSignIn`
 
-⚠ JWT-токены будут отключены в марте 2026 — используйте United Token.
+United Token был **удалён в v1.2.0** — остался только JWT flow.
 
 ### Ключевые функции
-- `auth_united_token(inn, thumbprint="")` → `(bool, str)` — United Token авторизация
 - `auth_jwt(thumbprint="")` → `(bool, str)` — JWT авторизация (2 шага)
-- `list_certificates()` → `list[dict]` — список сертификатов УКЭП (COM / cryptcp)
+- `list_certificates()` → `list[dict]` — список сертификатов УКЭП
 - `sign_data(data, thumbprint="")` → `bytes | None` — подпись данных УКЭП (attached CMS)
 - `set_log_fn(fn)` — подключить функцию логирования (для GUI)
 
-### Подпись через УКЭП
-- **Windows**: КриптоПро CSP COM-объекты (`win32com.client`) → fallback `cryptcp.exe`
-- **Linux**: `cryptcp` CLI
+### Порядок поиска сертификатов
+1. **CAPICOM.Store** (Windows Certificate Store — перехватывается КриптоПро CSP 5.x/4.x)
+2. **CPCSPStore.Store** (CSP 4.x — legacy)
+3. **cryptcp CLI** (fallback для Linux)
+
+### Порядок подписи
+1. **CAPICOM.Store + CAdESCOM.CPSigner + CAdESCOM.CadesSignedData** — Windows COM
+2. **CPCSPStore + CPSigner + CPSignedData** — legacy CSP 4.x
+3. **cryptcp CLI** — fallback
+
+### Важные детали
+- **CAPICOM.Store** — это стандартный Windows COM ProgID, который КриптоПро перехватывает и обогащает своими сертификатами. `CAdESCOM.Store` **НЕ существует** как ProgID.
+- **CAdESCOM.CPSigner** и **CAdESCOM.CadesSignedData** — правильные ProgID для подписи (КриптоПро CSP 5.x)
+- **CPCSPStore.Store** — legacy ProgID для CSP 4.x, требует `Open(StoreLocation, StoreName, OpenMode)`
+- **pywin32** нужен для COM-доступа на Windows (`pip install pywin32`), добавлен в `requirements.txt` с условием `sys_platform == "win32"`
 - Подпись **присоединённая** (attached CMS), кодируется в base64
-- ИНН для United Token — 10 или 12 цифр
+- ИНН для JWT flow — извлекается из сертификата (OID `1.2.643.3.131.1.1` или Subject DN)
 
 ### Диалог УКЭП в GUI
 - Меню: Настройки → «🔐 Получить токен через УКЭП»
-- Поля: ИНН (автоподстановка из .env/сертификата), список сертификатов, метод (United/JWT)
-- Кнопка «Получить токен» → фоновый поток → сохранение в .env
-- Сохраняет ИНН в `.env` (`CHESTNYZNAK_INN`) для автоподстановки
+- Список сертификатов (Listbox), метод: JWT через УКЭП
+- Кнопка «🔄 Обновить список» — перечитывает сертификаты
+- Кнопка «🔐 Получить токен» → фоновый поток → `auth_jwt(thumbprint)` → сохранение в .env
+- При сохранении токена пишется файл `.token_expires` с unix timestamp истечения (из JWT `exp` payload)
 
 ## Модуль обновлений (updater.py)
 

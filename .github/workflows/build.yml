@@ -29,7 +29,7 @@ jobs:
 
       - name: Build .exe
         run: |
-          pyinstaller --onefile --windowed --hidden-import openpyxl --name CISChecker gui_app.py
+          pyinstaller --onefile --windowed --hidden-import openpyxl --hidden-import win32com.client --hidden-import pywintypes --hidden-import pythoncom --name CISChecker gui_app.py
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

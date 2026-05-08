@@ -104,7 +104,7 @@ def list_certificates() -> list[dict]:
     }
 
     Порядок поиска:
-    1. CAdESCOM Store (КриптоПро ECP / CSP 5.x — актуальный COM-интерфейс)
+    1. CAPICOM.Store (Windows Certificate Store — перехватывается КриптоПро CSP 5.x/4.x)
     2. CPCSPStore (CSP 4.x — legacy)
     3. cryptcp CLI (fallback)
     """
@@ -133,41 +133,54 @@ def list_certificates() -> list[dict]:
 
 
 def _list_certs_cadescom() -> list[dict] | None:
-    """Список сертификатов через CAdESCOM.Store (КриптоПро ECP / CSP 5.x)."""
+    """Список сертификатов через CAPICOM.Store (Windows Certificate Store, перехватывается КриптоПро CSP)."""
     if platform.system() != "Windows":
         return None
     try:
         import win32com.client
     except ImportError:
+        _get_log_fn()("⚠ pywin32 не установлен — COM-доступ к сертификатам недоступен. Установите: pip install pywin32")
         return None
 
     log_fn = _get_log_fn()
     certs = []
 
-    # Пробуем разные хранилища: "My" (личные), "Root" (корневые)
-    store_names = ["My"]
-    for store_name in store_names:
-        try:
-            store = win32com.client.Dispatch("CAdESCOM.Store")
-            # Open(StoreLocation, StoreName, OpenMode)
-            # CAPICOM_CURRENT_USER_STORE=2, CAPICOM_STORE_OPEN_READ_ONLY=0
-            store.Open(
-                CAPICOM_CURRENT_USER_STORE,
-                store_name,
-                CAPICOM_STORE_OPEN_READ_ONLY,
-            )
+    # Пробуем хранилище "My" (личные сертификаты пользователя)
+    try:
+        log_fn("🔍 Открываю хранилище сертификатов (CAPICOM.Store)...")
+        store = win32com.client.Dispatch("CAPICOM.Store")
+        # Open(StoreLocation, StoreName, OpenMode)
+        # CAPICOM_CURRENT_USER_STORE=2, CAPICOM_STORE_OPEN_READ_ONLY=0
+        store.Open(
+            CAPICOM_CURRENT_USER_STORE,
+            "My",
+            CAPICOM_STORE_OPEN_READ_ONLY,
+        )
+        log_fn(f"📂 Хранилище открыто, сертификатов: {store.Certificates.Count()}")
 
+        for i in range(1, store.Certificates.Count() + 1):
+            cert = store.Certificates.Item(i)
+            info = _parse_cert_cadescom(cert)
+            if info:
+                certs.append(info)
+
+        store.Close()
+    except Exception as e:
+        log_fn(f"⚠ CAPICOM.Store: {e}")
+        # Пробуем альтернативный метод перебора
+        try:
+            store = win32com.client.Dispatch("CAPICOM.Store")
+            store.Open(CAPICOM_CURRENT_USER_STORE, "My", CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED)
             for cert in store.Certificates:
                 info = _parse_cert_cadescom(cert)
                 if info:
                     certs.append(info)
-
             store.Close()
-        except Exception as e:
-            log_fn(f"⚠ CAdESCOM Store '{store_name}': {e}")
-            continue
+            log_fn(f"📂 CAPICOM.Store (MAX_ALLOWED): найдено {len(certs)} сертификатов")
+        except Exception as e2:
+            log_fn(f"⚠ CAPICOM.Store (альтернативный метод): {e2}")
 
-    return certs if certs or len(certs) >= 0 else None
+    return certs if certs else None
 
 
 def _parse_cert_cadescom(cert) -> dict | None:
@@ -284,7 +297,7 @@ def _list_certs_legacy_com() -> list[dict] | None:
 
     try:
         store = win32com.client.Dispatch("CPCSPStore.Store")
-        store.Open()
+        store.Open(CAPICOM_CURRENT_USER_STORE, "My", CAPICOM_STORE_OPEN_READ_ONLY)
         certs = []
         for cert in store.Certificates:
             info = _parse_cert_com_legacy(cert)
@@ -443,30 +456,39 @@ def _find_cert_in_store(store, thumbprint: str):
 
 
 def _sign_cadescom(data: bytes, thumbprint: str = "") -> bytes | None:
-    """Подпись через CAdESCOM (КриптоПро ECP / CSP 5.x)."""
+    """Подпись через CAdESCOM (КриптоПро CSP 5.x). Хранилище сертификатов: CAPICOM.Store."""
     if platform.system() != "Windows":
         return None
     try:
         import win32com.client
     except ImportError:
+        _get_log_fn()("⚠ pywin32 не установлен — COM-подпись недоступна. Установите: pip install pywin32")
         return None
 
     log_fn = _get_log_fn()
 
     try:
         # Открываем хранилище
-        store = win32com.client.Dispatch("CAdESCOM.Store")
+        log_fn("🔍 Открываю хранилище сертификатов для подписи...")
+        store = win32com.client.Dispatch("CAPICOM.Store")
         store.Open(
             CAPICOM_CURRENT_USER_STORE,
             "My",
             CAPICOM_STORE_OPEN_READ_ONLY,
         )
 
+        cert_count = store.Certificates.Count
+        log_fn(f"📂 В хранилище {cert_count} сертификатов")
+
         # Находим сертификат
         cert = None
         if thumbprint:
             cert = _find_cert_in_store(store, thumbprint)
-        elif store.Certificates.Count > 0:
+            if cert:
+                log_fn(f"✅ Сертификат найден по thumbprint")
+            else:
+                log_fn(f"⚠ Сертификат с thumbprint не найден, пробуем первый...")
+        elif cert_count > 0:
             cert = store.Certificates.Item(1)
 
         store.Close()
