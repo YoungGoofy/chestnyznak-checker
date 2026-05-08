@@ -64,7 +64,7 @@ from updater import (
 # Константы
 # ══════════════════════════════════════════════════════════════════════
 APP_TITLE = "Честный Знак — Проверка кодов маркировки"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 WINDOW_WIDTH = 850
 WINDOW_HEIGHT = 620
 LOG_MAX_LINES = 500
@@ -105,6 +105,10 @@ COLOR_LOG_SUCCESS = "#a6e3a1"
 COLOR_LOG_INFO = "#89b4fa"
 COLOR_LOG_WARN = "#fab387"
 COLOR_HEADER_BG = "#313244"
+COLOR_UPDATE_NONE = "#585b70"      # серый — обновлений нет
+COLOR_UPDATE_AVAIL = "#a6e3a1"     # зелёный — доступно обновление
+COLOR_UPDATE_FG_NONE = "#cdd6f4"   # текст на серой кнопке
+COLOR_UPDATE_FG_AVAIL = "#1e1e2e"  # тёмный текст на зелёной кнопке
 
 # ══════════════════════════════════════════════════════════════════════
 # Очередь для передачи логов из фонового потока в GUI
@@ -167,6 +171,7 @@ class App:
         self.is_processing = False
         self._stop_requested = False                        # флаг остановки
         self.output_path: Path | None = None
+        self._pending_update: dict | None = None            # инфо об обновлении (если есть)
 
         # Загружаем .env
         load_env(SCRIPT_DIR)
@@ -182,6 +187,9 @@ class App:
         token = os.environ.get("CHESTNYZNAK_TOKEN", "")
         if not token:
             log_to_gui("⚠ Токен не задан. Открой «Настройки → Токен» и вставь токен.", "warn")
+
+        # Автопроверка обновлений при старте
+        self.root.after(1500, self._auto_check_updates)
 
     # ── Меню ────────────────────────────────────────────────────────
 
@@ -236,6 +244,16 @@ class App:
         self.token_status_label = Label(top_frame, text=status_text,
                                         font=("Segoe UI", 9), bg=COLOR_HEADER_BG, fg=status_color)
         self.token_status_label.pack(side="right", padx=16, pady=12)
+
+        # Кнопка-индикатор обновлений (появляется после проверки)
+        self.btn_update = Button(top_frame, text="🔄 Проверка...",
+                                 font=("Segoe UI", 9),
+                                 bg=COLOR_UPDATE_NONE, fg=COLOR_UPDATE_FG_NONE,
+                                 activebackground=COLOR_UPDATE_NONE, activeforeground=COLOR_UPDATE_FG_NONE,
+                                 relief="flat", padx=10, pady=2,
+                                 state=DISABLED,
+                                 command=self._on_update_button)
+        self.btn_update.pack(side="right", padx=(0, 8), pady=12)
 
         # Панель кнопок
         btn_frame = Frame(self.root, bg=COLOR_FRAME_BG, height=60)
@@ -821,16 +839,61 @@ class App:
         if self.is_processing:
             messagebox.showwarning("Обновление", "Сначала дождитесь завершения текущей проверки.")
             return
+        self._run_update_check()
 
-        log_to_gui("🔄 Проверяю обновления...", "info")
+    def _auto_check_updates(self) -> None:
+        """Автопроверка обновлений при старте (тихая, без диалогов)."""
+        log_to_gui("🔄 Проверка обновлений...", "info")
+        self.btn_update.config(text="🔄 Проверка...", state=DISABLED,
+                                bg=COLOR_UPDATE_NONE, fg=COLOR_UPDATE_FG_NONE)
 
         def _worker():
             has_update, message, release_info = _check_update()
 
             def _on_result():
+                self._pending_update = release_info if has_update else None
+                if has_update:
+                    latest_ver = release_info.get("version", "?") if release_info else "?"
+                    log_to_gui(f"🟢 Доступно обновление: v{latest_ver} (у вас v{APP_VERSION})", "success")
+                    self.btn_update.config(
+                        text=f"⬆ Обновление v{latest_ver}",
+                        state=NORMAL,
+                        bg=COLOR_UPDATE_AVAIL, fg=COLOR_UPDATE_FG_AVAIL,
+                        activebackground="#8be89c", activeforeground=COLOR_UPDATE_FG_AVAIL,
+                    )
+                else:
+                    log_to_gui("✓ Установлена последняя версия.", "info")
+                    self.btn_update.config(
+                        text="✓ Обновлений нет",
+                        state=DISABLED,
+                        bg=COLOR_UPDATE_NONE, fg=COLOR_UPDATE_FG_NONE,
+                        activebackground=COLOR_UPDATE_NONE, activeforeground=COLOR_UPDATE_FG_NONE,
+                    )
+
+            self.root.after(0, _on_result)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_update_check(self) -> None:
+        """Ручная проверка обновлений из меню (с диалогами)."""
+        log_to_gui("🔄 Проверяю обновления...", "info")
+        self.btn_update.config(text="🔄 Проверка...", state=DISABLED,
+                                bg=COLOR_UPDATE_NONE, fg=COLOR_UPDATE_FG_NONE)
+
+        def _worker():
+            has_update, message, release_info = _check_update()
+
+            def _on_result():
+                self._pending_update = release_info if has_update else None
                 if has_update and release_info:
-                    # Есть обновление
                     latest_ver = release_info.get("version", "?")
+                    log_to_gui(f"🟢 Доступно обновление: v{latest_ver} (у вас v{APP_VERSION})", "success")
+                    self.btn_update.config(
+                        text=f"⬆ Обновление v{latest_ver}",
+                        state=NORMAL,
+                        bg=COLOR_UPDATE_AVAIL, fg=COLOR_UPDATE_FG_AVAIL,
+                        activebackground="#8be89c", activeforeground=COLOR_UPDATE_FG_AVAIL,
+                    )
                     result = messagebox.askyesno(
                         "Доступно обновление",
                         f"Доступна новая версия v{latest_ver} (у вас v{APP_VERSION}).\n\n"
@@ -840,12 +903,31 @@ class App:
                     if result:
                         self._apply_update(release_info)
                 else:
-                    # Нет обновления или ошибка
+                    log_to_gui("✓ Установлена последняя версия.", "info")
+                    self.btn_update.config(
+                        text="✓ Обновлений нет",
+                        state=DISABLED,
+                        bg=COLOR_UPDATE_NONE, fg=COLOR_UPDATE_FG_NONE,
+                        activebackground=COLOR_UPDATE_NONE, activeforeground=COLOR_UPDATE_FG_NONE,
+                    )
                     messagebox.showinfo("Обновление", message)
 
             self.root.after(0, _on_result)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_update_button(self) -> None:
+        """Нажатие на кнопку-индикатор обновлений."""
+        if self._pending_update:
+            release_info = self._pending_update
+            latest_ver = release_info.get("version", "?")
+            result = messagebox.askyesno(
+                "Обновление",
+                f"Скачать и установить v{latest_ver}?\n\n"
+                f"{'⚠ Приложение перезапустится.' if _is_frozen() else 'ℹ Автообновление доступно только в .exe-режиме.'}",
+            )
+            if result:
+                self._apply_update(release_info)
 
     def _apply_update(self, release_info: dict) -> None:
         """Скачивает и применяет обновление."""
