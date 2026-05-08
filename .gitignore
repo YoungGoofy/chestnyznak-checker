@@ -15,6 +15,7 @@ env/
 # Secrets (never commit tokens!)
 .env
 .token_timestamp
+.token_expires
 
 # IDE
 .idea/
@@ -27,6 +28,6 @@ env/
 .DS_Store
 Thumbs.db
 
-# PyInstaller output
-dist/
-build/
+# Update temp
+_update_tmp/
+_update.bat
