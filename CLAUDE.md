@@ -174,7 +174,7 @@ United Token был **удалён в v1.2.0** — остался только J
 
 ### Ключевые функции
 - `auth_jwt(thumbprint="")` → `(bool, str)` — JWT авторизация (2 шага)
-- `list_certificates()` → `list[dict]` — список сертификатов УКЭП
+- `list_certificates()` → `list[dict]` — список сертификатов УКЭП (только действующие, только на съёмных носителях — USB-токен/флешка)
 - `sign_data(data, thumbprint="")` → `bytes | None` — подпись данных УКЭП (attached CMS)
 - `set_log_fn(fn)` — подключить функцию логирования (для GUI)
 

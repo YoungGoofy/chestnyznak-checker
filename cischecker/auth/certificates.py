@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import platform
+from datetime import datetime
 
 # ── Константы хранилищ ─────────────────────────────────────────────────
 CAPICOM_CURRENT_USER_STORE = 2
@@ -63,9 +64,70 @@ def _com_initialized():
         yield
 
 
+def _is_expired(not_after: str) -> bool:
+    """Проверяет, просрочен ли сертификат по дате ValidToDate."""
+    if not not_after:
+        return False  # Не можем определить — показываем
+    try:
+        # КриптоПро возвращает даты в разных форматах
+        for fmt in (
+            "%m/%d/%Y %I:%M:%S %p",    # 01/15/2027 12:00:00 PM (EN)
+            "%d.%m.%Y %H:%M:%S",       # 15.01.2027 12:00:00 (RU)
+            "%Y-%m-%dT%H:%M:%S",       # ISO
+            "%Y-%m-%d %H:%M:%S",       # ISO space
+            "%m/%d/%Y %H:%M:%S",       # US 24h
+            "%d.%m.%Y",               # RU short
+        ):
+            try:
+                expiry = datetime.strptime(not_after.strip(), fmt)
+                return expiry < datetime.now()
+            except ValueError:
+                continue
+        # Fallback: попробовать через dateutil-подобный парсинг
+        # Если не удалось распознать — не фильтруем
+        return False
+    except Exception:
+        return False
+
+
+def _is_on_removable_media(container_name: str) -> bool:
+    r"""Определяет, находится ли закрытый ключ на съёмном носителе.
+
+    КриптоПро UniqueContainerName содержит путь вида:
+      \\.\REGISTRY\...  — реестр (локальное хранилище)
+      \\.\HDIMAGE\...   — жёсткий диск
+      \\.\FLASH\...     — флеш-накопитель / USB-токен
+      \\.\FAT12\...     — FAT12 (RuToken, eToken)
+      \\.\<reader>\...  — имя считывателя
+
+    Ключи в REGISTRY и HDIMAGE — это локальные, установленные
+    в систему. Всё остальное — съёмные носители.
+    """
+    if not container_name:
+        return False
+    cn_upper = container_name.upper()
+    # Локальные хранилища — точно НЕ съёмный носитель
+    local_prefixes = ("\\\\.\\REGISTRY", "\\\\.\\HDIMAGE")
+    for prefix in local_prefixes:
+        if cn_upper.startswith(prefix):
+            return False
+    # Если имя контейнера начинается с \\.\ — это какой-то
+    # считыватель, скорее всего съёмный носитель
+    if cn_upper.startswith("\\\\.\\"): 
+        return True
+    # Если формат нестандартный — допускаем, что съёмный
+    return True
+
+
 def list_certificates() -> list[dict]:
     """
-    Возвращает список сертификатов УКЭП.
+    Возвращает список сертификатов УКЭП на съёмных носителях.
+
+    Фильтрация:
+    - Только действующие (не просроченные) сертификаты
+    - Только сертификаты с закрытым ключом на съёмном носителе
+      (USB-токен, RuToken, eToken, флешка)
+    - Исключаются сертификаты из реестра и жёсткого диска
 
     Каждый сертификат: {
         "thumbprint": "XX XX ...",
@@ -96,31 +158,83 @@ def list_certificates() -> list[dict]:
         # 1. CAdESCOM.Store — КриптоПро CSP 5.x (основной)
         certs = _list_certs_cadescom_store()
         if certs:
-            _log(f"📋 Найдено сертификатов (CAdESCOM.Store): {len(certs)}", "success")
-            return certs
+            filtered = _filter_certs(certs)
+            _log(
+                f"📋 Найдено сертификатов (CAdESCOM.Store): {len(certs)}, "
+                f"на съёмных носителях (действующих): {len(filtered)}",
+                "success",
+            )
+            if filtered:
+                return filtered
+            # Если после фильтрации ничего нет — попробуем другие store
 
         # 2. CAPICOM.Store — Windows Certificate Store
         certs = _list_certs_capicom_store()
         if certs:
-            _log(f"📋 Найдено сертификатов (CAPICOM.Store): {len(certs)}", "success")
-            return certs
+            filtered = _filter_certs(certs)
+            _log(
+                f"📋 Найдено сертификатов (CAPICOM.Store): {len(certs)}, "
+                f"на съёмных носителях (действующих): {len(filtered)}",
+                "success",
+            )
+            if filtered:
+                return filtered
 
         # 3. CPCSPStore — legacy CSP 4.x
         certs = _list_certs_legacy_store()
         if certs:
-            _log(f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}", "success")
-            return certs
+            filtered = _filter_certs(certs)
+            _log(
+                f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}, "
+                f"на съёмных носителях (действующих): {len(filtered)}",
+                "success",
+            )
+            if filtered:
+                return filtered
 
         _log(
-            "⚠ Сертификаты не найдены.\n"
+            "⚠ Подходящие сертификаты не найдены.\n"
             "   Проверьте:\n"
+            "   • USB-токен (RuToken/eToken) подключён к ПК\n"
+            "   • Сертификат на токене не просрочен\n"
             "   • КриптоПро CSP установлен и лицензия активна\n"
-            "   • USB-токен (RuToken/eToken) подключён\n"
-            "   • Сертификат установлен в хранилище «Личные»\n"
-            "   • В КриптоПро CSP → Сервис → Просмотреть сертификаты — сертификат виден",
+            "   • Сертификат виден в КриптоПро CSP → Сервис → Просмотреть сертификаты",
             "warn",
         )
         return []
+
+
+def _filter_certs(certs: list[dict]) -> list[dict]:
+    """Фильтрует сертификаты: только действующие на съёмных носителях."""
+    result = []
+    for cert in certs:
+        # Пропускаем просроченные
+        if _is_expired(cert.get("not_after", "")):
+            _log(
+                f"  ⏭ Пропущен (просрочен): {cert.get('subject', '?')[:60]}..."
+                f" (до {cert.get('not_after', '?')})",
+            )
+            continue
+
+        # Пропускаем без закрытого ключа
+        if not cert.get("has_private_key", False):
+            _log(
+                f"  ⏭ Пропущен (нет закрытого ключа): "
+                f"{cert.get('subject', '?')[:60]}...",
+            )
+            continue
+
+        # Пропускаем ключи из реестра/диска (не на съёмном носителе)
+        container = cert.get("container_name", "")
+        if container and not _is_on_removable_media(container):
+            _log(
+                f"  ⏭ Пропущен (локальное хранилище): "
+                f"{cert.get('subject', '?')[:60]}... [{container}]",
+            )
+            continue
+
+        result.append(cert)
+    return result
 
 
 def _list_certs_cadescom_store() -> list[dict]:
@@ -283,6 +397,27 @@ def _parse_cert(cert) -> dict | None:
         except Exception:
             pass
 
+        # Проверяем наличие закрытого ключа
+        has_private_key = False
+        try:
+            has_private_key = bool(cert.HasPrivateKey())
+        except Exception:
+            try:
+                has_private_key = bool(cert.HasPrivateKey)
+            except Exception:
+                pass
+
+        # Извлекаем UniqueContainerName для определения носителя
+        container_name = ""
+        if has_private_key:
+            try:
+                container_name = cert.PrivateKey.UniqueContainerName or ""
+            except Exception:
+                try:
+                    container_name = cert.PrivateKey.ContainerName or ""
+                except Exception:
+                    pass
+
         # Извлекаем ИНН
         inn = _extract_inn_from_subject(subject)
 
@@ -296,6 +431,8 @@ def _parse_cert(cert) -> dict | None:
             "not_before": not_before,
             "not_after": not_after,
             "inn": inn,
+            "has_private_key": has_private_key,
+            "container_name": container_name,
         }
     except Exception:
         return None
