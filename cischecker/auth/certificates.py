@@ -13,6 +13,22 @@
        pythoncom.CoInitialize() / CoUninitialize() для корректной работы
        в фоновых потоках (threading.Thread). Без этого вызова COM-объекты
        недоступны и возвращают ошибку -2147221008 (CoInitialize not called).
+
+Подавление UI-окон КриптоПро (silent mode):
+  Обращение к cert.PrivateKey.UniqueContainerName через COM вызывает CSP
+  Provider, который показывает системный диалог «выберите считыватель»
+  для сертификатов из кэша с отключённым токеном.
+
+  Стратегия: сначала читаем CERT_KEY_PROV_INFO_PROP_ID через CryptoAPI
+  (без COM, без UI), затем проверяем физическую доступность ключа через
+  CryptAcquireContextW с флагом CRYPT_SILENT. Если ключ недоступен —
+  молча пропускаем сертификат. Если доступен — безопасно читаем
+  cert.PrivateKey.UniqueContainerName (UI не появится, т.к. токен вставлен).
+
+Дедупликация:
+  Сертификаты собираются из ВСЕХ доступных Store (CAdESCOM + CAPICOM +
+  CPCSPStore), затем дедуплицируются по thumbprint, чтобы исключить
+  дубли из разных хранилищ.
 """
 from __future__ import annotations
 
@@ -27,6 +43,11 @@ CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED = 2
 
 # OID КриптоПро для ИНН
 OID_INN = "1.2.643.3.131.1.1"
+
+# ── Константы CryptoAPI ────────────────────────────────────────────────
+CERT_KEY_PROV_INFO_PROP_ID = 2
+CRYPT_SILENT = 0x40
+CRYPT_MACHINE_KEYSET = 0x20
 
 # Логирование
 _log_fn = None
@@ -94,30 +115,361 @@ def _is_on_removable_media(container_name: str) -> bool:
     r"""Определяет, находится ли закрытый ключ на съёмном носителе.
 
     КриптоПро UniqueContainerName содержит путь вида:
-      \\.\REGISTRY\...  — реестр (локальное хранилище)
-      \\.\HDIMAGE\...   — жёсткий диск
-      \\.\FLASH\...     — флеш-накопитель / USB-токен
-      \\.\FAT12\...     — FAT12 (RuToken, eToken)
-      \\.\<reader>\...  — имя считывателя
+      \\.\REGISTRY\...  — реестр (ЛОКАЛЬНОЕ хранилище)
+      \\.\HDIMAGE\...   — виртуальный жёсткий диск КриптоПро (ЛОКАЛЬНОЕ)
+      \\.\FLASH\...     — USB-флешка (СЪЁМНЫЙ)
+      \\.\FAT12\...     — FAT12, eToken/RuToken (СЪЁМНЫЙ)
+      \\.\FAT16\...     — FAT16 (СЪЁМНЫЙ)
+      \\.\aktiv co. ruToken 0\... — RuToken (СЪЁМНЫЙ)
+      \\.\JaCarta\...   — JaCarta (СЪЁМНЫЙ)
+      \\.\eToken\...    — eToken (СЪЁМНЫЙ)
+      \\.\<reader>\...  — любой другой считыватель (СЪЁМНЫЙ)
 
-    Ключи в REGISTRY и HDIMAGE — это локальные, установленные
-    в систему. Всё остальное — съёмные носители.
+    Правило: REGISTRY и HDIMAGE — локальные. Всё остальное с \\.\ —
+    считыватель/носитель, т.е. съёмный.
     """
     if not container_name:
         return False
     cn_upper = container_name.upper()
-    # Локальные хранилища — точно НЕ съёмный носитель
-    local_prefixes = ("\\\\.\\REGISTRY", "\\\\.\\HDIMAGE")
-    for prefix in local_prefixes:
-        if cn_upper.startswith(prefix):
-            return False
-    # Если имя контейнера начинается с \\.\ — это какой-то
-    # считыватель, скорее всего съёмный носитель
-    if cn_upper.startswith("\\\\.\\"): 
+    # Локальные хранилища КриптоПро — точно НЕ съёмный носитель
+    if cn_upper.startswith("\\\\.\\REGISTRY") or cn_upper.startswith("\\\\.\\HDIMAGE"):
+        return False
+    # Любой \\.\<reader> — считыватель, съёмный носитель
+    if cn_upper.startswith("\\\\.\\"):
         return True
-    # Если формат нестандартный — допускаем, что съёмный
+    # Нестандартный формат (логическое имя контейнера без пути) —
+    # не можем определить. Считаем съёмным, т.к. ключ уже проверен
+    # на доступность через _test_key_accessible_silent.
     return True
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Silent-проверки ключей (без UI-диалогов КриптоПро)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _read_cert_prov_info(cert) -> dict | None:
+    """Читает CERT_KEY_PROV_INFO_PROP_ID из сертификата через CryptoAPI.
+
+    НЕ обращается к cert.PrivateKey — не вызывает UI-диалоги.
+
+    Возвращает dict с ключами:
+      ContainerName — логическое имя контейнера (напр. "lea-0c5e0...")
+      ProvName       — имя CSP (напр. "Crypto-Pro GOST R 34.10-2012 KC1 Strong CSP")
+      ProvType       — тип CSP (целое)
+      Flags          — флаги (CRYPT_MACHINE_KEYSET и пр.)
+    Или None, если свойство недоступно.
+    """
+    cert_handle = None
+    try:
+        cert_handle = cert.Handle
+    except Exception:
+        return None
+
+    if not cert_handle:
+        return None
+
+    # Способ 1: win32crypt (если cert.Handle совместим с PyCERT_CONTEXT)
+    try:
+        import win32crypt
+        import win32cryptcon
+        prov_info = win32crypt.CertGetCertificateContextProperty(
+            cert_handle, win32cryptcon.CERT_KEY_PROV_INFO_PROP_ID
+        )
+        if prov_info:
+            return {
+                "ContainerName": prov_info.get("ContainerName", ""),
+                "ProvName": prov_info.get("ProvName", ""),
+                "ProvType": prov_info.get("ProvType", 0),
+                "Flags": prov_info.get("Flags", 0),
+            }
+    except Exception:
+        pass  # cert.Handle несовместим с win32crypt — пробуем ctypes
+
+    # Способ 2: ctypes crypt32.CertGetCertificateContextProperty
+    try:
+        handle_int = int(cert_handle)
+        if handle_int:
+            return _read_prov_info_ctypes(handle_int)
+    except (TypeError, ValueError):
+        pass
+
+    return None
+
+
+def _read_prov_info_ctypes(cert_handle_int: int) -> dict | None:
+    """Читает CRYPT_KEY_PROV_INFO через ctypes (crypt32.dll).
+
+    cert_handle_int: целочисленное значение PCCERT_CONTEXT.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    crypt32 = ctypes.WinDLL("crypt32")
+
+    cb_data = wintypes.DWORD(0)
+    if not crypt32.CertGetCertificateContextProperty(
+        cert_handle_int, CERT_KEY_PROV_INFO_PROP_ID,
+        None, ctypes.byref(cb_data),
+    ) or cb_data.value == 0:
+        return None
+
+    buf = ctypes.create_string_buffer(cb_data.value)
+    if not crypt32.CertGetCertificateContextProperty(
+        cert_handle_int, CERT_KEY_PROV_INFO_PROP_ID,
+        buf, ctypes.byref(cb_data),
+    ):
+        return None
+
+    # Структура CRYPT_KEY_PROV_INFO:
+    #   LPCWSTR pwszContainerName;   // ptr [0 .. ptr_size)
+    #   LPCWSTR pwszProvName;        // ptr [ptr_size .. 2*ptr_size)
+    #   DWORD   dwProvType;          // [2*ptr_size .. 2*ptr_size+4)
+    #   DWORD   dwFlags;             // [2*ptr_size+4 .. 2*ptr_size+8)
+    #   DWORD   cProvParam;
+    #   PCRYPT_KEY_PROV_PARAM rgProvParam;
+    ptr_size = ctypes.sizeof(ctypes.c_void_p)
+    raw = buf.raw
+
+    if len(raw) < ptr_size * 2 + 8:
+        return None
+
+    container_ptr = int.from_bytes(raw[0:ptr_size], "little")
+    provider_ptr = int.from_bytes(raw[ptr_size : ptr_size * 2], "little")
+    prov_type = int.from_bytes(raw[ptr_size * 2 : ptr_size * 2 + 4], "little")
+    flags = int.from_bytes(raw[ptr_size * 2 + 4 : ptr_size * 2 + 8], "little")
+
+    container_name = ""
+    if container_ptr:
+        try:
+            container_name = ctypes.wstring_at(container_ptr) or ""
+        except Exception:
+            pass
+
+    provider_name = ""
+    if provider_ptr:
+        try:
+            provider_name = ctypes.wstring_at(provider_ptr) or ""
+        except Exception:
+            pass
+
+    if not container_name and not provider_name:
+        return None
+
+    return {
+        "ContainerName": container_name,
+        "ProvName": provider_name,
+        "ProvType": prov_type,
+        "Flags": flags,
+    }
+
+
+def _test_key_accessible_silent(
+    container_name: str,
+    provider_name: str,
+    provider_type: int,
+    flags: int,
+) -> bool:
+    """Проверяет физическую доступность ключа БЕЗ UI-диалогов.
+
+    Вызывает CryptAcquireContextW с флагом CRYPT_SILENT.
+    Возвращает True, если ключевой контейнер можно открыть
+    (токен вставлен или ключ в локальном хранилище).
+    Возвращает False, если ключ недоступен (токен не вставлен).
+    Никаких диалогов не показывается — CRYPT_SILENT подавляет UI CSP.
+    """
+    if not container_name or not provider_name:
+        return False
+
+    try:
+        import ctypes
+
+        advapi32 = ctypes.WinDLL("advapi32")
+
+        acquire_flags = CRYPT_SILENT
+        if flags & CRYPT_MACHINE_KEYSET:
+            acquire_flags |= CRYPT_MACHINE_KEYSET
+
+        hProv = ctypes.c_void_p()
+        result = advapi32.CryptAcquireContextW(
+            ctypes.byref(hProv),
+            container_name,
+            provider_name,
+            provider_type,
+            acquire_flags,
+        )
+
+        if result:
+            advapi32.CryptReleaseContext(hProv, 0)
+            return True
+
+        return False
+    except Exception:
+        # Не удалось проверить (ctypes недоступен и т.п.) —
+        # возвращаем True, чтобы избежать ложных отсечек.
+        return True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Парсинг сертификата
+# ═══════════════════════════════════════════════════════════════════════
+
+def _parse_cert(cert) -> dict | None:
+    """Парсит COM-объект сертификата в словарь.
+
+    Ключевое: НЕ обращается к cert.PrivateKey напрямую, чтобы
+    избежать UI-диалогов КриптоПро для отключённых токенов.
+
+    Алгоритм:
+    1. Читаем базовые свойства (Subject, Issuer, Thumbprint, даты) —
+       никогда не вызывают UI.
+    2. Читаем CERT_KEY_PROV_INFO_PROP_ID через CryptoAPI —
+       получаем ContainerName, ProvName, ProvType, Flags — БЕЗ UI.
+    3. Вызываем CryptAcquireContextW с CRYPT_SILENT для проверки
+       физической доступности ключа — БЕЗ UI.
+    4. Если ключ доступен → безопасно читаем cert.PrivateKey.Unique-
+       ContainerName (UI не появится, т.к. токен вставлен).
+    5. Если ключ недоступен → has_private_key=False, сертификат
+       будет отфильтрован.
+    """
+    try:
+        # ── Базовые свойства (безопасные, без UI) ──────────────────────
+
+        # SubjectName (КриптоПро) или Subject (CAPICOM standard)
+        subject = ""
+        for attr in ("SubjectName", "Subject"):
+            try:
+                subject = getattr(cert, attr, "") or ""
+                if subject:
+                    break
+            except Exception:
+                continue
+
+        # IssuerName или Issuer
+        issuer = ""
+        for attr in ("IssuerName", "Issuer"):
+            try:
+                issuer = getattr(cert, attr, "") or ""
+                if issuer:
+                    break
+            except Exception:
+                continue
+
+        thumbprint = ""
+        try:
+            thumbprint = cert.Thumbprint or ""
+        except Exception:
+            pass
+
+        not_before = ""
+        try:
+            not_before = str(cert.ValidFromDate or "")
+        except Exception:
+            pass
+
+        not_after = ""
+        try:
+            not_after = str(cert.ValidToDate or "")
+        except Exception:
+            pass
+
+        # ── Проверка закрытого ключа (SILENT) ──────────────────────────
+
+        has_private_key = False
+        container_name = ""
+
+        # Шаг 1: Читаем провайдерную информацию БЕЗ обращения к COM PrivateKey
+        prov_info = _read_cert_prov_info(cert)
+
+        if prov_info:
+            prov_container = prov_info.get("ContainerName", "")
+            prov_name = prov_info.get("ProvName", "")
+            prov_type = prov_info.get("ProvType", 0)
+            prov_flags = prov_info.get("Flags", 0)
+
+            _log(
+                f"    🔑 ProvInfo: container={prov_container!r}, "
+                f"provider={prov_name!r}, type={prov_type}, flags={prov_flags:#x}",
+                "debug",
+            )
+
+            # Шаг 2: Тихо проверяем доступность ключевого контейнера
+            accessible = _test_key_accessible_silent(
+                prov_container, prov_name, prov_type, prov_flags
+            )
+
+            if accessible:
+                # Шаг 3: Ключ доступен — безопасно читаем UniqueContainerName
+                # (UI НЕ появится, т.к. токен физически вставлен)
+                has_private_key = True
+                try:
+                    container_name = cert.PrivateKey.UniqueContainerName or ""
+                except Exception:
+                    try:
+                        container_name = cert.PrivateKey.ContainerName or ""
+                    except Exception:
+                        # Fallback: используем логическое имя из prov_info
+                        container_name = prov_container
+
+                _log(
+                    f"    ✅ Ключ доступен: {container_name!r}",
+                    "debug",
+                )
+            else:
+                # Ключ НЕ доступен (токен не вставлен) — пропускаем молча
+                _log(
+                    f"    🚫 Ключ недоступен (токен не вставлен): "
+                    f"{prov_container!r} [{prov_name}]",
+                    "debug",
+                )
+                has_private_key = False
+                container_name = ""
+        else:
+            # Нет prov_info — cert.Handle недоступен или несовместим.
+            # Fallback: проверяем HasPrivateKey() через COM, затем
+            # пробуем PrivateKey (может показать UI для отключённых токенов,
+            # но это единственный путь без CryptoAPI).
+            _log("    ℹ ProvInfo недоступен, fallback к COM", "debug")
+
+            try:
+                has_private_key = bool(cert.HasPrivateKey())
+            except Exception:
+                try:
+                    has_private_key = bool(cert.HasPrivateKey)
+                except Exception:
+                    pass
+
+            if has_private_key:
+                try:
+                    container_name = cert.PrivateKey.UniqueContainerName or ""
+                except Exception:
+                    try:
+                        container_name = cert.PrivateKey.ContainerName or ""
+                    except Exception:
+                        pass
+
+        # ── ИНН из Subject ────────────────────────────────────────────
+        inn = _extract_inn_from_subject(subject)
+
+        if not thumbprint:
+            return None
+
+        return {
+            "thumbprint": thumbprint,
+            "subject": subject,
+            "issuer": issuer,
+            "not_before": not_before,
+            "not_after": not_after,
+            "inn": inn,
+            "has_private_key": has_private_key,
+            "container_name": container_name,
+        }
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Фильтрация и дедупликация
+# ═══════════════════════════════════════════════════════════════════════
 
 def list_certificates() -> list[dict]:
     """
@@ -128,6 +480,7 @@ def list_certificates() -> list[dict]:
     - Только сертификаты с закрытым ключом на съёмном носителе
       (USB-токен, RuToken, eToken, флешка)
     - Исключаются сертификаты из реестра и жёсткого диска
+    - Дедупликация по thumbprint
 
     Каждый сертификат: {
         "thumbprint": "XX XX ...",
@@ -154,73 +507,91 @@ def list_certificates() -> list[dict]:
         return []
 
     with _com_initialized():
+        # ── Собираем из ВСЕХ доступных Store ────────────────────────
+        all_certs: list[dict] = []
+        sources: list[str] = []
 
         # 1. CAdESCOM.Store — КриптоПро CSP 5.x (основной)
         certs = _list_certs_cadescom_store()
         if certs:
-            filtered = _filter_certs(certs)
-            _log(
-                f"📋 Найдено сертификатов (CAdESCOM.Store): {len(certs)}, "
-                f"на съёмных носителях (действующих): {len(filtered)}",
-                "success",
-            )
-            if filtered:
-                return filtered
-            # Если после фильтрации ничего нет — попробуем другие store
+            all_certs.extend(certs)
+            sources.append("CAdESCOM.Store")
 
         # 2. CAPICOM.Store — Windows Certificate Store
         certs = _list_certs_capicom_store()
         if certs:
-            filtered = _filter_certs(certs)
-            _log(
-                f"📋 Найдено сертификатов (CAPICOM.Store): {len(certs)}, "
-                f"на съёмных носителях (действующих): {len(filtered)}",
-                "success",
-            )
-            if filtered:
-                return filtered
+            all_certs.extend(certs)
+            sources.append("CAPICOM.Store")
 
         # 3. CPCSPStore — legacy CSP 4.x
         certs = _list_certs_legacy_store()
         if certs:
-            filtered = _filter_certs(certs)
+            all_certs.extend(certs)
+            sources.append("CPCSPStore")
+
+        if not all_certs:
             _log(
-                f"📋 Найдено сертификатов (CPCSPStore): {len(certs)}, "
-                f"на съёмных носителях (действующих): {len(filtered)}",
-                "success",
+                "⚠ Подходящие сертификаты не найдены.\n"
+                "   Проверьте:\n"
+                "   • USB-токен (RuToken/eToken) подключён к ПК\n"
+                "   • Сертификат на токене не просрочен\n"
+                "   • КриптоПро CSP установлен и лицензия активна\n"
+                "   • Сертификат виден в КриптоПро CSP → Сервис → "
+                "Просмотреть сертификаты",
+                "warn",
             )
-            if filtered:
-                return filtered
+            return []
+
+        _log(f"  📋 Всего сырых сертификатов из {sources}: {len(all_certs)}")
+
+        # ── Дедупликация по thumbprint ──────────────────────────────
+        seen: dict[str, bool] = {}
+        unique_certs: list[dict] = []
+        for cert in all_certs:
+            tp = cert.get("thumbprint", "").strip().lower().replace(" ", "")
+            if tp and tp not in seen:
+                seen[tp] = True
+                unique_certs.append(cert)
+
+        dupes = len(all_certs) - len(unique_certs)
+        if dupes > 0:
+            _log(f"  🔄 Дедупликация: убрано {dupes} дубликатов")
+
+        # ── Фильтрация ──────────────────────────────────────────────
+        filtered = _filter_certs(unique_certs)
 
         _log(
-            "⚠ Подходящие сертификаты не найдены.\n"
-            "   Проверьте:\n"
-            "   • USB-токен (RuToken/eToken) подключён к ПК\n"
-            "   • Сертификат на токене не просрочен\n"
-            "   • КриптоПро CSP установлен и лицензия активна\n"
-            "   • Сертификат виден в КриптоПро CSP → Сервис → Просмотреть сертификаты",
-            "warn",
+            f"📋 Уникальных: {len(unique_certs)}, "
+            f"на съёмных носителях (действующих): {len(filtered)}",
+            "success",
         )
-        return []
+
+        return filtered
 
 
 def _filter_certs(certs: list[dict]) -> list[dict]:
-    """Фильтрует сертификаты: только действующие на съёмных носителях."""
+    """Фильтрует сертификаты: только действующие на съёмных носителях.
+
+    Важно: сертификаты с has_private_key=False уже отсеяны в _parse_cert
+    (ключ недоступен → has_private_key=False). Поэтому здесь мы только
+    проверяем сроки и тип носителя.
+    """
     result = []
     for cert in certs:
         # Пропускаем просроченные
         if _is_expired(cert.get("not_after", "")):
             _log(
                 f"  ⏭ Пропущен (просрочен): {cert.get('subject', '?')[:60]}..."
-                f" (до {cert.get('not_after', '?')})",
+                f" (до {cert.get('not_after', '?')})"
             )
             continue
 
         # Пропускаем без закрытого ключа
+        # (ключ недоступен — токен не вставлен, обработано в _parse_cert)
         if not cert.get("has_private_key", False):
             _log(
                 f"  ⏭ Пропущен (нет закрытого ключа): "
-                f"{cert.get('subject', '?')[:60]}...",
+                f"{cert.get('subject', '?')[:60]}..."
             )
             continue
 
@@ -233,9 +604,25 @@ def _filter_certs(certs: list[dict]) -> list[dict]:
             )
             continue
 
+        # Если container_name пуст, но has_private_key=True —
+        # ключ доступен, но мы не знаем точный путь. Не отсеиваем,
+        # потому что _test_key_accessible_silent уже подтвердила
+        # доступность (токен вставлен), а _is_on_removable_media
+        # не может дать False для пустой строки.
+        if not container:
+            _log(
+                f"  ℹ Нет имени контейнера, но ключ доступен: "
+                f"{cert.get('subject', '?')[:60]}...",
+                "debug",
+            )
+
         result.append(cert)
     return result
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Перечисление сертификатов из COM-хранилищ
+# ═══════════════════════════════════════════════════════════════════════
 
 def _list_certs_cadescom_store() -> list[dict]:
     """Сертификаты через CAdESCOM.Store (КриптоПро CSP 5.x).
@@ -356,87 +743,9 @@ def _list_certs_legacy_store() -> list[dict]:
     return certs
 
 
-def _parse_cert(cert) -> dict | None:
-    """Парсит COM-объект сертификата в словарь."""
-    try:
-        # SubjectName (КриптоПро) или Subject (CAPICOM standard)
-        subject = ""
-        for attr in ("SubjectName", "Subject"):
-            try:
-                subject = getattr(cert, attr, "") or ""
-                if subject:
-                    break
-            except Exception:
-                continue
-
-        # IssuerName или Issuer
-        issuer = ""
-        for attr in ("IssuerName", "Issuer"):
-            try:
-                issuer = getattr(cert, attr, "") or ""
-                if issuer:
-                    break
-            except Exception:
-                continue
-
-        thumbprint = ""
-        try:
-            thumbprint = cert.Thumbprint or ""
-        except Exception:
-            pass
-
-        not_before = ""
-        try:
-            not_before = str(cert.ValidFromDate or "")
-        except Exception:
-            pass
-
-        not_after = ""
-        try:
-            not_after = str(cert.ValidToDate or "")
-        except Exception:
-            pass
-
-        # Проверяем наличие закрытого ключа
-        has_private_key = False
-        try:
-            has_private_key = bool(cert.HasPrivateKey())
-        except Exception:
-            try:
-                has_private_key = bool(cert.HasPrivateKey)
-            except Exception:
-                pass
-
-        # Извлекаем UniqueContainerName для определения носителя
-        container_name = ""
-        if has_private_key:
-            try:
-                container_name = cert.PrivateKey.UniqueContainerName or ""
-            except Exception:
-                try:
-                    container_name = cert.PrivateKey.ContainerName or ""
-                except Exception:
-                    pass
-
-        # Извлекаем ИНН
-        inn = _extract_inn_from_subject(subject)
-
-        if not thumbprint:
-            return None
-
-        return {
-            "thumbprint": thumbprint,
-            "subject": subject,
-            "issuer": issuer,
-            "not_before": not_before,
-            "not_after": not_after,
-            "inn": inn,
-            "has_private_key": has_private_key,
-            "container_name": container_name,
-        }
-    except Exception:
-        return None
-
+# ═══════════════════════════════════════════════════════════════════════
+# Вспомогательные функции
+# ═══════════════════════════════════════════════════════════════════════
 
 def _extract_inn_from_subject(subject: str) -> str:
     """Извлекает ИНН из Subject DN сертификата."""
@@ -460,7 +769,9 @@ def _extract_inn_from_subject(subject: str) -> str:
                         hex_str = val[1:]
                         if len(hex_str) >= 8:
                             inn_hex = hex_str[4:]  # пропускаем ASN.1 tag+length
-                            inn_val = bytes.fromhex(inn_hex).decode("ascii", errors="ignore").strip()
+                            inn_val = bytes.fromhex(inn_hex).decode(
+                                "ascii", errors="ignore"
+                            ).strip()
                             if inn_val.isdigit() and len(inn_val) in (10, 12):
                                 return inn_val
                     except Exception:
@@ -500,9 +811,11 @@ def diagnose_com() -> str:
     with _com_initialized():
         results = []
 
-        for prog_id in ["CAdESCOM.Store", "CAPICOM.Store", "CPCSPStore.Store",
-                         "CAdESCOM.CPSigner", "CAdESCOM.CadesSignedData",
-                         "CAdESCOM.About"]:
+        for prog_id in [
+            "CAdESCOM.Store", "CAPICOM.Store", "CPCSPStore.Store",
+            "CAdESCOM.CPSigner", "CAdESCOM.CadesSignedData",
+            "CAdESCOM.About",
+        ]:
             try:
                 obj = win32com.client.Dispatch(prog_id)
                 results.append(f"  ✅ {prog_id} — доступен")
