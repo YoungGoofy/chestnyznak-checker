@@ -621,6 +621,213 @@ def _filter_certs(certs: list[dict]) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Упрощённый список сертификатов (без обращения к PrivateKey / CryptoAPI)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _parse_cert_simple(cert) -> dict | None:
+    """Парсит COM-объект сертификата в словарь — БЕЗОПАСНЫЙ вариант.
+
+    НЕ обращается к cert.PrivateKey, cert.Handle, CryptoAPI — НИКОГДА
+    не вызывает UI-диалоги КриптоПро. Читает только:
+    - SubjectName / Subject
+    - IssuerName / Issuer
+    - Thumbprint
+    - ValidFromDate / ValidToDate
+    - ИНН из Subject DN
+    """
+    try:
+        # SubjectName (КриптоПро) или Subject (CAPICOM standard)
+        subject = ""
+        for attr in ("SubjectName", "Subject"):
+            try:
+                subject = getattr(cert, attr, "") or ""
+                if subject:
+                    break
+            except Exception:
+                continue
+
+        # IssuerName или Issuer
+        issuer = ""
+        for attr in ("IssuerName", "Issuer"):
+            try:
+                issuer = getattr(cert, attr, "") or ""
+                if issuer:
+                    break
+            except Exception:
+                continue
+
+        thumbprint = ""
+        try:
+            thumbprint = cert.Thumbprint or ""
+        except Exception:
+            pass
+
+        not_before = ""
+        try:
+            not_before = str(cert.ValidFromDate or "")
+        except Exception:
+            pass
+
+        not_after = ""
+        try:
+            not_after = str(cert.ValidToDate or "")
+        except Exception:
+            pass
+
+        # ИНН из Subject
+        inn = _extract_inn_from_subject(subject)
+
+        if not thumbprint:
+            return None
+
+        return {
+            "thumbprint": thumbprint,
+            "subject": subject,
+            "issuer": issuer,
+            "not_before": not_before,
+            "not_after": not_after,
+            "inn": inn,
+        }
+    except Exception:
+        return None
+
+
+def _list_certs_simple_from_store(prog_id: str) -> list[dict]:
+    """Перечисляет сертификаты из COM-хранилища БЕЗ обращения к PrivateKey.
+
+    Использует _parse_cert_simple() — никаких UI-диалогов КриптоПро.
+    """
+    try:
+        import win32com.client
+        store = win32com.client.Dispatch(prog_id)
+    except Exception as e:
+        _log(f"  ℹ {prog_id} недоступен: {e}")
+        return []
+
+    certs = []
+    try:
+        store.Open(
+            CAPICOM_CURRENT_USER_STORE,
+            "My",
+            CAPICOM_STORE_OPEN_READ_ONLY,
+        )
+
+        count = store.Certificates.Count
+        _log(f"  📂 {prog_id}: {count} сертификатов")
+
+        for i in range(1, count + 1):
+            try:
+                cert = store.Certificates.Item(i)
+                info = _parse_cert_simple(cert)
+                if info:
+                    certs.append(info)
+            except Exception as e:
+                _log(f"  ⚠ Ошибка сертификата #{i} ({prog_id}): {e}")
+
+        store.Close()
+    except Exception as e:
+        _log(f"  ⚠ {prog_id} ошибка: {e}")
+        try:
+            store.Close()
+        except Exception:
+            pass
+
+    return certs
+
+
+def list_all_valid_certificates() -> list[dict]:
+    """Возвращает все действующие (не просроченные) сертификаты.
+
+    В отличие от list_certificates():
+    - НЕ проверяет наличие закрытого ключа (нет обращения к PrivateKey)
+    - НЕ фильтрует по типу носителя (съёмный / реестр)
+    - НЕ вызывает CryptoAPI → НИКОГДА не показывает UI-диалоги КриптоПро
+
+    Фильтрация:
+    - Только действующие (не просроченные) по ValidToDate
+    - Дедупликация по thumbprint
+
+    Каждый сертификат: {
+        "thumbprint": "XX XX ...",
+        "subject": "...",
+        "issuer": "...",
+        "not_before": "...",
+        "not_after": "...",
+        "inn": "1234567890",
+    }
+    """
+    if platform.system() != "Windows":
+        _log("⚠ УКЭП доступен только на Windows.", "warn")
+        return []
+
+    try:
+        import win32com.client  # noqa: F401
+    except ImportError:
+        _log(
+            "❌ Библиотека pywin32 не установлена.\n"
+            "   Установите: pip install pywin32\n"
+            "   Затем перезапустите приложение.",
+            "error",
+        )
+        return []
+
+    with _com_initialized():
+        all_certs: list[dict] = []
+        sources: list[str] = []
+
+        for prog_id in ("CAdESCOM.Store", "CAPICOM.Store", "CPCSPStore.Store"):
+            certs = _list_certs_simple_from_store(prog_id)
+            if certs:
+                all_certs.extend(certs)
+                sources.append(prog_id)
+
+        if not all_certs:
+            _log(
+                "⚠ Сертификаты не найдены.\n"
+                "   Проверьте:\n"
+                "   • КриптоПро CSP установлен и лицензия активна\n"
+                "   • Сертификат установлен в хранилище «Личные»\n"
+                "   • Сертификат виден в КриптоПро CSP → Сервис → "
+                "Просмотреть сертификаты",
+                "warn",
+            )
+            return []
+
+        _log(f"  📋 Всего сертификатов из {sources}: {len(all_certs)}")
+
+        # Дедупликация по thumbprint
+        seen: dict[str, bool] = {}
+        unique: list[dict] = []
+        for cert in all_certs:
+            tp = cert.get("thumbprint", "").strip().lower().replace(" ", "")
+            if tp and tp not in seen:
+                seen[tp] = True
+                unique.append(cert)
+
+        dupes = len(all_certs) - len(unique)
+        if dupes > 0:
+            _log(f"  🔄 Дедупликация: убрано {dupes} дубликатов")
+
+        # Фильтрация: только действующие (не просроченные)
+        valid: list[dict] = []
+        for cert in unique:
+            if _is_expired(cert.get("not_after", "")):
+                _log(
+                    f"  ⏭ Пропущен (просрочен): "
+                    f"{cert.get('subject', '?')[:60]}..."
+                )
+                continue
+            valid.append(cert)
+
+        _log(
+            f"📋 Уникальных: {len(unique)}, действующих: {len(valid)}",
+            "success",
+        )
+
+        return valid
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Перечисление сертификатов из COM-хранилищ
 # ═══════════════════════════════════════════════════════════════════════
 

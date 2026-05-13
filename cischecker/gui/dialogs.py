@@ -8,13 +8,17 @@ import threading
 import time
 from pathlib import Path
 from tkinter import (
-    Toplevel, Frame, Label, Button, Entry, Listbox, Scrollbar,
-    StringVar, END, VERTICAL, DISABLED, NORMAL, messagebox,
+    Toplevel, Frame, Label, Button, Entry, Scrollbar,
+    StringVar, END, VERTICAL, HORIZONTAL, DISABLED, NORMAL, messagebox,
 )
+from tkinter import ttk
 
 from .. import APP_VERSION, APP_TITLE, GITHUB_REPO
 from ..core.env import save_token_to_env
-from ..auth.certificates import list_certificates, diagnose_com, set_log_fn as set_cert_log_fn
+from ..auth.certificates import (
+    list_all_valid_certificates, diagnose_com,
+    set_log_fn as set_cert_log_fn,
+)
 from ..auth.jwt_flow import auth_jwt, set_log_fn as set_jwt_log_fn
 from .theme import *
 from .log_widget import log_to_gui
@@ -117,7 +121,11 @@ class TokenDialog:
 
 
 class UkepDialog:
-    """Окно авторизации через УКЭП."""
+    """Окно авторизации через УКЭП.
+
+    Отображает все действующие сертификаты в таблице (№, ИНН, Subject)
+    с динамической фильтрацией по ИНН.
+    """
 
     def __init__(self, parent, script_dir: Path, on_token_saved=None):
         self.script_dir = script_dir
@@ -126,7 +134,7 @@ class UkepDialog:
 
         dlg = Toplevel(parent)
         dlg.title("Получить токен через УКЭП")
-        dlg.geometry("600x550")
+        dlg.geometry("720x580")
         dlg.configure(bg=COLOR_FRAME_BG)
         dlg.resizable(True, True)
         dlg.transient(parent)
@@ -142,32 +150,83 @@ class UkepDialog:
         Label(dlg, text="🔐 Авторизация через УКЭП",
               font=("Segoe UI", 13, "bold"), bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG).pack(pady=(16, 4))
         Label(dlg,
-              text="Подключите USB-токен (RuToken) и выберите сертификат.\n"
+              text="Выберите сертификат из списка.\n"
                    "Токен будет получен автоматически и сохранён в настройки.",
               font=FONT_SMALL, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO,
-              wraplength=560, justify="center").pack(pady=(0, 12))
+              wraplength=680, justify="center").pack(pady=(0, 8))
 
-        # Список сертификатов
+        # ── Поле фильтрации по ИНН ────────────────────────────────────
+        filter_frame = Frame(dlg, bg=COLOR_FRAME_BG)
+        filter_frame.pack(fill="x", padx=16, pady=(0, 4))
+
+        Label(filter_frame, text="🔍 Фильтр по ИНН:",
+              font=FONT_MAIN, bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG
+              ).pack(side="left", padx=(0, 8))
+
+        self.inn_filter_var = StringVar()
+        self.inn_filter_var.trace_add("write", self._on_inn_filter_changed)
+
+        self.inn_filter_entry = Entry(filter_frame, font=FONT_CODE,
+                                       textvariable=self.inn_filter_var,
+                                       bg=COLOR_LOG_BG, fg=COLOR_LOG_FG,
+                                       insertbackground=COLOR_LOG_FG,
+                                       relief="flat", width=20)
+        self.inn_filter_entry.pack(side="left", fill="x", expand=True)
+
+        # ── Таблица сертификатов (Treeview) ────────────────────────────
         certs_frame = Frame(dlg, bg=COLOR_FRAME_BG)
-        certs_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        certs_frame.pack(fill="both", expand=True, padx=16, pady=(4, 8))
 
         Label(certs_frame, text="Сертификаты УКЭП:", font=FONT_MAIN,
               bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG).pack(anchor="w", pady=(0, 4))
 
-        lb_frame = Frame(certs_frame, bg=COLOR_LOG_BG)
-        lb_frame.pack(fill="both", expand=True)
+        tree_frame = Frame(certs_frame, bg=COLOR_LOG_BG)
+        tree_frame.pack(fill="both", expand=True)
 
-        self.certs_listbox = Listbox(lb_frame, font=FONT_CODE,
-                                      bg=COLOR_LOG_BG, fg=COLOR_LOG_FG,
-                                      selectbackground=COLOR_BUTTON_ACCENT,
-                                      selectforeground="#1e1e2e",
-                                      relief="flat", height=6)
-        sb = Scrollbar(lb_frame, orient=VERTICAL, command=self.certs_listbox.yview)
-        self.certs_listbox.config(yscrollcommand=sb.set)
-        self.certs_listbox.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        # Стиль для Treeview (Catppuccin Mocha)
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Certs.Treeview",
+                         background=COLOR_LOG_BG,
+                         foreground=COLOR_LOG_FG,
+                         fieldbackground=COLOR_LOG_BG,
+                         font=FONT_CODE,
+                         rowheight=24)
+        style.configure("Certs.Treeview.Heading",
+                         background=COLOR_HEADER_BG,
+                         foreground=COLOR_BUTTON_FG,
+                         font=FONT_MAIN,
+                         relief="flat")
+        style.map("Certs.Treeview",
+                   background=[("selected", COLOR_BUTTON_ACCENT)],
+                   foreground=[("selected", "#1e1e2e")])
+        style.map("Certs.Treeview.Heading",
+                   background=[("active", COLOR_BUTTON_ACTIVE_BG)])
 
-        # Кнопки управления
+        columns = ("num", "inn", "subject")
+        self.certs_tree = ttk.Treeview(
+            tree_frame, columns=columns, show="headings",
+            style="Certs.Treeview", selectmode="browse",
+        )
+        self.certs_tree.heading("num", text="№")
+        self.certs_tree.heading("inn", text="ИНН")
+        self.certs_tree.heading("subject", text="Сертификат")
+
+        self.certs_tree.column("num", width=40, minwidth=30, stretch=False, anchor="center")
+        self.certs_tree.column("inn", width=120, minwidth=80, stretch=False)
+        self.certs_tree.column("subject", width=500, minwidth=200, stretch=True)
+
+        vsb = Scrollbar(tree_frame, orient=VERTICAL, command=self.certs_tree.yview)
+        hsb = Scrollbar(tree_frame, orient=HORIZONTAL, command=self.certs_tree.xview)
+        self.certs_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.certs_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # ── Кнопки управления ──────────────────────────────────────────
         ctrl_frame = Frame(dlg, bg=COLOR_FRAME_BG)
         ctrl_frame.pack(fill="x", padx=16, pady=(0, 4))
 
@@ -191,7 +250,7 @@ class UkepDialog:
         Label(dlg, text="Метод: JWT через УКЭП",
               font=FONT_MAIN, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO).pack(padx=16, anchor="w", pady=(0, 8))
 
-        # Кнопки действия
+        # ── Кнопки действия ────────────────────────────────────────────
         btn_frame = Frame(dlg, bg=COLOR_FRAME_BG)
         btn_frame.pack(pady=(0, 16))
 
@@ -212,28 +271,58 @@ class UkepDialog:
         # Загружаем сертификаты
         self._load_certs()
 
+    def _populate_tree(self, certs: list[dict] | None = None) -> None:
+        """Заполняет Treeview сертификатами с учётом фильтра по ИНН."""
+        # Очищаем
+        for item in self.certs_tree.get_children():
+            self.certs_tree.delete(item)
+
+        if certs is None:
+            certs = self.certs_data
+
+        inn_filter = self.inn_filter_var.get().strip()
+
+        num = 0
+        for cert in certs:
+            inn = cert.get("inn", "")
+            # Динамическая фильтрация: показываем только серты,
+            # ИНН которых начинается с введённого текста
+            if inn_filter and not inn.startswith(inn_filter):
+                continue
+
+            num += 1
+            subject = cert.get("subject", "Неизвестный")
+            # Укорачиваем subject для читаемости
+            display_subject = subject[:120] + "..." if len(subject) > 120 else subject
+
+            self.certs_tree.insert("", END, iid=str(num - 1),
+                                    values=(num, inn or "—", display_subject))
+
+        if num == 0 and self.certs_data:
+            self.certs_tree.insert("", END, values=("—", "—", "Нет сертификатов с таким ИНН"))
+
+    def _on_inn_filter_changed(self, *_args) -> None:
+        """Обработчик изменения поля фильтра — обновляет таблицу."""
+        self._populate_tree()
+
     def _load_certs(self):
-        self.certs_listbox.delete(0, END)
+        """Загружает сертификаты в фоновом потоке."""
         self.certs_data.clear()
+        self._populate_tree()
         self.status_var.set("⏳ Загрузка...")
 
         def worker():
-            certs = list_certificates()
+            certs = list_all_valid_certificates()
 
             def on_done():
                 self.status_var.set("")
+                self.certs_data.clear()
                 if not certs:
-                    self.certs_listbox.insert(END, "  Сертификаты не найдены.")
-                    self.certs_listbox.insert(END, "  Нажмите «Диагностика COM» для проверки.")
+                    self.certs_tree.insert("", END,
+                                            values=("—", "—", "Сертификаты не найдены. Нажмите «Диагностика COM»."))
                 else:
-                    for cert in certs:
-                        subject = cert.get("subject", "Неизвестный")
-                        inn = cert.get("inn", "")
-                        display = f"  {subject}"
-                        if inn:
-                            display += f" (ИНН: {inn})"
-                        self.certs_listbox.insert(END, display)
-                        self.certs_data.append(cert)
+                    self.certs_data.extend(certs)
+                    self._populate_tree()
 
             self.parent.after(0, on_done)
 
@@ -255,18 +344,61 @@ class UkepDialog:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _get_selected_cert_index(self) -> int | None:
+        """Возвращает индекс выбранного сертификата в self.certs_data или None."""
+        selection = self.certs_tree.selection()
+        if not selection:
+            return None
+
+        # iid в Treeview — это строковый индекс, но при фильтрации
+        # нам нужно найти реальный индекс в certs_data
+        sel_values = self.certs_tree.item(selection[0], "values")
+        if not sel_values:
+            return None
+
+        # Ищем по ИНН + subject для точного соответствия
+        sel_inn = str(sel_values[1]) if sel_values[1] != "—" else ""
+        sel_subject_start = str(sel_values[2])[:60]
+
+        for i, cert in enumerate(self.certs_data):
+            cert_inn = cert.get("inn", "")
+            cert_subject_start = cert.get("subject", "")[:60]
+            if cert_inn == sel_inn and cert_subject_start == sel_subject_start:
+                return i
+
+        return None
+
     def _do_auth(self):
+        idx = self._get_selected_cert_index()
+
         thumbprint = ""
-        sel = self.certs_listbox.curselection()
-        if sel and sel[0] < len(self.certs_data):
-            thumbprint = self.certs_data[sel[0]].get("thumbprint", "")
+        inn_from_cert = ""
+        cert_subject = ""
+
+        if idx is not None:
+            cert_data = self.certs_data[idx]
+            thumbprint = cert_data.get("thumbprint", "")
+            inn_from_cert = cert_data.get("inn", "")
+            cert_subject = cert_data.get("subject", "")
+        else:
+            if self.certs_data:
+                messagebox.showwarning(
+                    "Выберите сертификат",
+                    "Выберите сертификат из таблицы.",
+                    parent=self.dlg,
+                )
+                return
 
         self.status_var.set("⏳ Авторизация...")
         self.btn_auth.config(state=DISABLED)
 
-        inn_from_cert = ""
-        if sel and sel[0] < len(self.certs_data):
-            inn_from_cert = self.certs_data[sel[0]].get("inn", "")
+        # Логируем выбранный сертификат
+        if cert_subject:
+            subject_short = cert_subject[:80] + ("..." if len(cert_subject) > 80 else "")
+            log_to_gui(f"📝 Выбран сертификат: {subject_short}", "info")
+            if inn_from_cert:
+                log_to_gui(f"   ИНН: {inn_from_cert}", "info")
+            log_to_gui(f"   Thumbprint: {thumbprint}", "info")
 
         def worker():
             success, result = auth_jwt(thumbprint)
@@ -285,7 +417,17 @@ class UkepDialog:
                         exp_path.write_text(str(time.time() + 36000), "utf-8")
 
                     self.status_var.set("✅ Токен получен!")
+
+                    # Логируем каким сертификатом подписали
+                    log_to_gui("═" * 50, "bold")
                     log_to_gui("🔐 JWT-токен получен через УКЭП", "success")
+                    if cert_subject:
+                        subject_short = cert_subject[:80] + ("..." if len(cert_subject) > 80 else "")
+                        log_to_gui(f"   Подпись сертификатом: {subject_short}", "success")
+                    if inn_from_cert:
+                        log_to_gui(f"   ИНН: {inn_from_cert}", "success")
+                    log_to_gui("═" * 50, "bold")
+
                     if self.on_token_saved:
                         self.on_token_saved(result)
                     messagebox.showinfo("Токен получен",
@@ -309,7 +451,7 @@ class HelpDialog:
 
         dlg = Toplevel(parent)
         dlg.title("Инструкция")
-        dlg.geometry("600x450")
+        dlg.geometry("620x520")
         dlg.configure(bg=COLOR_FRAME_BG)
         dlg.resizable(True, True)
         dlg.transient(parent)
@@ -331,13 +473,23 @@ class HelpDialog:
    Способ Б: Настройки → Получить токен через УКЭП
    - Нужен установленный КриптоПро CSP 5.x + УКЭП (RuToken)
    - Нажмите «🔄 Обновить список» → выберите сертификат
+   - Используйте поле «Фильтр по ИНН» для быстрого поиска
    - Нажмите «🔐 Получить токен» — токен сохранится автоматически
    - Если сертификаты не появляются → «🔍 Диагностика COM»
 
 2. Выберите товарную группу (выпадающий список сверху)
 
-3. Загрузите список кодов (Файл → Загрузить коды)
+3. Загрузите коды маркировки (два способа):
+
+   Способ А: Ввод вручную
+   - Введите или вставьте коды в текстовое поле «Коды маркировки»
+   - Каждый код на отдельной строке
+   - Пустые строки будут пропущены
+
+   Способ Б: Загрузка из файла
+   - Файл → Загрузить коды из файла
    - TXT-файл, по одному коду на строку
+   - Коды из файла появятся в текстовом поле
 
 4. Нажмите «📂 Отправить список кодов»
    - Коды отправляются пачками по 100

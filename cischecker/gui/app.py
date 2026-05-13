@@ -10,9 +10,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from tkinter import (
-    Tk, Frame, Label, Button, Menu,
+    Tk, Frame, Label, Button, Menu, Text,
     filedialog, messagebox, StringVar,
-    DISABLED, NORMAL,
+    DISABLED, NORMAL, END,
 )
 from tkinter import ttk
 
@@ -178,6 +178,33 @@ class App:
               font=FONT_SMALL, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO
               ).pack(side="right", padx=16, pady=12)
 
+        # ── Поле ввода кодов ───────────────────────────────────────
+        codes_frame = Frame(self.root, bg=COLOR_FRAME_BG)
+        codes_frame.pack(fill="x", side="top", padx=8, pady=(4, 0))
+
+        Label(codes_frame,
+              text="Коды маркировки (каждый код с новой строки):",
+              font=FONT_SMALL, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO
+              ).pack(anchor="w", padx=4, pady=(4, 2))
+
+        codes_text_frame = Frame(codes_frame, bg=COLOR_LOG_BG)
+        codes_text_frame.pack(fill="x", padx=4, pady=(0, 4))
+
+        from tkinter import Scrollbar as TkScrollbar
+        self.codes_text = Text(codes_text_frame, font=FONT_CODE,
+                               bg=COLOR_LOG_BG, fg=COLOR_LOG_FG,
+                               insertbackground=COLOR_LOG_FG,
+                               relief="flat", height=5, wrap="none")
+        codes_sb = TkScrollbar(codes_text_frame, orient="vertical",
+                                command=self.codes_text.yview)
+        self.codes_text.config(yscrollcommand=codes_sb.set)
+        self.codes_text.pack(side="left", fill="x", expand=True)
+        codes_sb.pack(side="right", fill="y")
+
+        # Автозамена , и ; на перенос строки
+        self.codes_text.bind("<KeyRelease>", self._sanitize_codes_field)
+        self.codes_text.bind("<<Paste>>", self._on_codes_paste)
+
         # Логи
         log_frame = Frame(self.root, bg=COLOR_BG)
         log_frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -186,35 +213,74 @@ class App:
 
     # ── Загрузка и запуск ──────────────────────────────────────────
 
+    def _sanitize_codes_field(self, _event=None) -> None:
+        """Заменяет , и ; на перенос строки в поле кодов."""
+        content = self.codes_text.get("1.0", END)
+        if "," in content or ";" in content:
+            cursor = self.codes_text.index("insert")
+            cleaned = content.replace(",", "\n").replace(";", "\n")
+            self.codes_text.delete("1.0", END)
+            self.codes_text.insert("1.0", cleaned.rstrip("\n"))
+            try:
+                self.codes_text.mark_set("insert", cursor)
+            except Exception:
+                pass
+
+    def _on_codes_paste(self, _event=None) -> None:
+        """Обрабатывает вставку: заменяет , и ; на переносы строк."""
+        self.codes_text.after(10, self._sanitize_codes_field)
+
+    @staticmethod
+    def _parse_codes_from_text(text: str) -> list[str]:
+        """Парсит коды из текста. Разделитель — только новая строка.
+
+        Коды маркировки могут содержать запятые и точки с запятой,
+        поэтому разделяем ТОЛЬКО по переносам строк.
+        Пустые строки пропускаются, пробелы по краям обрезаются.
+        Дедупликация.
+        """
+        codes = [line.strip() for line in text.splitlines() if line.strip()]
+        seen: set[str] = set()
+        return [c for c in codes if not (c in seen or seen.add(c))]
+
     def _load_codes_from_file(self) -> None:
+        """Загружает коды из файла и вставляет в текстовое поле."""
         path = filedialog.askopenfilename(
             title="Выберите файл с кодами маркировки",
             filetypes=[("Текстовые файлы", "*.txt"), ("Все файлы", "*.*")],
         )
-        if path:
-            self._run_from_file(Path(path))
-
-    def _load_and_run(self) -> None:
-        self._load_codes_from_file()
-
-    def _run_from_file(self, file_path: Path) -> None:
-        if self.is_processing:
-            messagebox.showwarning("Идёт обработка", "Дождитесь завершения текущей проверки.")
+        if not path:
             return
-
         try:
-            raw = file_path.read_text("utf-8")
+            raw = Path(path).read_text("utf-8")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось прочитать файл:\n{e}")
             return
 
-        codes = [line.strip() for line in raw.splitlines() if line.strip()]
-        if not codes:
-            messagebox.showwarning("Пустой файл", "Файл не содержит ни одного кода.")
+        # Вставляем в текстовое поле
+        self.codes_text.delete("1.0", END)
+        self.codes_text.insert("1.0", raw.strip())
+        log_to_gui(f"📂 Загружено из файла: {path}", "info")
+
+    def _load_and_run(self) -> None:
+        """Берёт коды из текстового поля. Если пусто — открывает файл."""
+        if self.is_processing:
+            messagebox.showwarning("Идёт обработка", "Дождитесь завершения текущей проверки.")
             return
 
-        seen = set()
-        self.codes = [c for c in codes if not (c in seen or seen.add(c))]
+        text = self.codes_text.get("1.0", END).strip()
+        if not text:
+            # Поле пустое — предлагаем загрузить файл
+            self._load_codes_from_file()
+            text = self.codes_text.get("1.0", END).strip()
+            if not text:
+                return
+
+        self.codes = self._parse_codes_from_text(text)
+        if not self.codes:
+            messagebox.showwarning("Нет кодов", "Введите хотя бы один код маркировки.")
+            return
+
         self._run_check()
 
     def _run_check(self) -> None:
@@ -495,5 +561,5 @@ def main() -> None:
     app = App(root)
     log_to_gui(f"🚀 {APP_TITLE} v{APP_VERSION}", "bold")
     log_to_gui(f"📁 Папка: {SCRIPT_DIR}", "info")
-    log_to_gui("📋 Готов. Загрузите файл с кодами.", "info")
+    log_to_gui("📋 Готов. Введите коды в поле или загрузите из файла.", "info")
     root.mainloop()
