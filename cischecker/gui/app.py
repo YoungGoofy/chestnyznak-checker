@@ -201,10 +201,6 @@ class App:
         self.codes_text.pack(side="left", fill="x", expand=True)
         codes_sb.pack(side="right", fill="y")
 
-        # Автозамена , и ; на перенос строки
-        self.codes_text.bind("<KeyRelease>", self._sanitize_codes_field)
-        self.codes_text.bind("<<Paste>>", self._on_codes_paste)
-
         # Логи
         log_frame = Frame(self.root, bg=COLOR_BG)
         log_frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -212,23 +208,6 @@ class App:
         self.log_widget.pack(fill="both", expand=True)
 
     # ── Загрузка и запуск ──────────────────────────────────────────
-
-    def _sanitize_codes_field(self, _event=None) -> None:
-        """Заменяет , и ; на перенос строки в поле кодов."""
-        content = self.codes_text.get("1.0", END)
-        if "," in content or ";" in content:
-            cursor = self.codes_text.index("insert")
-            cleaned = content.replace(",", "\n").replace(";", "\n")
-            self.codes_text.delete("1.0", END)
-            self.codes_text.insert("1.0", cleaned.rstrip("\n"))
-            try:
-                self.codes_text.mark_set("insert", cursor)
-            except Exception:
-                pass
-
-    def _on_codes_paste(self, _event=None) -> None:
-        """Обрабатывает вставку: заменяет , и ; на переносы строк."""
-        self.codes_text.after(10, self._sanitize_codes_field)
 
     @staticmethod
     def _parse_codes_from_text(text: str) -> list[str]:
