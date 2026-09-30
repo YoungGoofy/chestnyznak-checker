@@ -116,8 +116,8 @@ class UpdaterUI:
 
             def on_result():
                 if success:
-                    log_to_gui("✅ Обновление скачано. Перезапускаю...", "bold")
-                    self.root.after(1000, self.root.destroy)
+                    log_to_gui("✅ Обновление установлено. Перезапускаю...", "bold")
+                    self.root.after(500, self.root.destroy)
                 else:
                     log_to_gui(f"❌ {msg}", "error")
                     messagebox.showerror("Ошибка обновления", msg)

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -94,30 +93,26 @@ def download_exe(url: str, dest: Path, progress_fn=None) -> bool:
         return False
 
 
-def create_updater_bat(old_exe: Path, new_exe: Path) -> Path:
-    bat_path = old_exe.parent / "_update.bat"
-    bat_content = f"""@echo off
-echo Updating CISChecker...
-:wait_loop
-tasklist /fi "pid eq {os.getpid()}" 2>nul | find "{os.getpid()}" >nul
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >nul
-    goto wait_loop
-)
-copy /y "{new_exe}" "{old_exe}"
-if errorlevel 1 (
-    echo ERROR: Failed to replace executable.
-    pause
-    del "%~f0"
-    exit /b 1
-)
-del /f "{new_exe}"
-start "" "{old_exe}"
-del "%~f0"
-exit
-"""
-    bat_path.write_text(bat_content, encoding="cp866")
-    return bat_path
+def cleanup_after_update() -> None:
+    """Удаляет артефакты прошлого обновления (CISChecker.old, _update_tmp)."""
+    if not is_frozen():
+        return
+    exe = get_exe_path()
+    try:
+        exe.with_suffix(".old").unlink()
+    except OSError:
+        pass
+    tmp = exe.parent / "_update_tmp"
+    if tmp.is_dir():
+        for f in tmp.iterdir():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        try:
+            tmp.rmdir()
+        except OSError:
+            pass
 
 
 def perform_update(exe_url: str, progress_fn=None) -> tuple[bool, str]:
@@ -147,19 +142,42 @@ def perform_update(exe_url: str, progress_fn=None) -> tuple[bool, str]:
             temp_dir.rmdir()
         return False, f"Скачанный файл слишком мал ({file_size} байт)."
 
-    bat_path = create_updater_bat(current_exe, new_exe)
+    # Подмена на лету: работающий .exe нельзя перезаписать, но можно
+    # переименовать. Переименовываем старый, переносим новый на его место,
+    # запускаем новый процесс и выходим — без .bat и ожидания смерти PID.
+    backup = current_exe.with_suffix(".old")
+    renamed = False
+    try:
+        backup.unlink(missing_ok=True)
+        current_exe.rename(backup)
+        renamed = True
+        new_exe.replace(current_exe)
+    except OSError as e:
+        if renamed and not current_exe.exists():
+            try:
+                backup.rename(current_exe)
+            except OSError:
+                pass
+        return False, f"Не удалось заменить .exe: {e}"
+
+    try:
+        temp_dir.rmdir()
+    except OSError:
+        pass
 
     try:
         subprocess.Popen(
-            [str(bat_path)],
+            [str(current_exe)],
             cwd=str(current_exe.parent),
-            creationflags=0x00000008,
             close_fds=True,
         )
     except OSError as e:
-        return False, f"Ошибка запуска обновления: {e}"
+        return False, (
+            f"Обновление установлено, но запустить не удалось: {e}.\n"
+            "Запустите приложение вручную."
+        )
 
-    return True, "Обновление скачано. Приложение перезапустится..."
+    return True, "Обновление установлено. Перезапускаю..."
 
 
 def check_for_update() -> tuple[bool, str, dict | None]:

@@ -19,7 +19,7 @@ from ..auth.certificates import (
     list_all_valid_certificates, diagnose_com,
     set_log_fn as set_cert_log_fn,
 )
-from ..auth.jwt_flow import auth_jwt, set_log_fn as set_jwt_log_fn
+from ..auth.auth_flow import auth_uuid_token, set_log_fn as set_auth_flow_log_fn
 from .theme import *
 from .log_widget import log_to_gui
 
@@ -144,7 +144,7 @@ class UkepDialog:
 
         # Подключаем логирование
         set_cert_log_fn(log_to_gui)
-        set_jwt_log_fn(log_to_gui)
+        set_auth_flow_log_fn(log_to_gui)
 
         # Заголовок
         Label(dlg, text="🔐 Авторизация через УКЭП",
@@ -247,7 +247,7 @@ class UkepDialog:
               font=FONT_SMALL, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO).pack(side="right", padx=4)
 
         # Метод
-        Label(dlg, text="Метод: JWT через УКЭП",
+        Label(dlg, text="Метод: единый токен (UUID) через УКЭП",
               font=FONT_MAIN, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO).pack(padx=16, anchor="w", pady=(0, 8))
 
         # ── Кнопки действия ────────────────────────────────────────────
@@ -401,26 +401,23 @@ class UkepDialog:
             log_to_gui(f"   Thumbprint: {thumbprint}", "info")
 
         def worker():
-            success, result = auth_jwt(thumbprint)
+            success, result, expires_at = auth_uuid_token(thumbprint, inn_from_cert)
 
             def on_done():
                 self.btn_auth.config(state=NORMAL)
                 if success:
                     save_token_to_env(self.script_dir, result, inn_from_cert)
 
-                    # Сохраняем срок действия
-                    expires_at = get_token_expiry(result)
+                    # Сохраняем срок действия (expireDate из ответа, фолбэк — 10 часов)
                     exp_path = self.script_dir / ".token_expires"
-                    if expires_at is not None:
-                        exp_path.write_text(str(expires_at), "utf-8")
-                    else:
-                        exp_path.write_text(str(time.time() + 36000), "utf-8")
+                    exp_path.write_text(
+                        str(expires_at if expires_at else time.time() + 36000), "utf-8")
 
                     self.status_var.set("✅ Токен получен!")
 
                     # Логируем каким сертификатом подписали
                     log_to_gui("═" * 50, "bold")
-                    log_to_gui("🔐 JWT-токен получен через УКЭП", "success")
+                    log_to_gui("🔐 Единый токен (UUID) получен через УКЭП", "success")
                     if cert_subject:
                         subject_short = cert_subject[:80] + ("..." if len(cert_subject) > 80 else "")
                         log_to_gui(f"   Подпись сертификатом: {subject_short}", "success")
@@ -431,7 +428,7 @@ class UkepDialog:
                     if self.on_token_saved:
                         self.on_token_saved(result)
                     messagebox.showinfo("Токен получен",
-                                        "JWT-токен успешно получен и сохранён!",
+                                        "Единый токен (UUID) успешно получен и сохранён!",
                                         parent=self.dlg)
                     self.dlg.destroy()
                 else:

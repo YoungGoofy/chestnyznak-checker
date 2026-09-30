@@ -94,6 +94,16 @@ def true_check_batch(codes: list[str], pg: str, token: str, debug: bool = False,
         return (status, None)
 
     if status == 404:
+        # По докам True API HTTP 404 приходит с телом-массивом по кодам
+        # (errorCode "404", «КИ не найден») — парсим как обычный результат,
+        # а не роняем весь батч.
+        try:
+            data = json.loads(body or "")
+            if isinstance(data, list):
+                _log(f"⚠ HTTP 404: часть кодов не найдена в ТГ «{pg}»", "warn")
+                return (status, data)
+        except json.JSONDecodeError:
+            pass
         msg = f"⚠ HTTP 404 для pg={pg} — возможно, неверная товарная группа."
         _log(msg, "warn")
         return (status, None)

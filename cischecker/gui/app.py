@@ -348,7 +348,8 @@ class App:
                         found = set()
                         for item in data:
                             cis_info = item.get("cisInfo", item)
-                            c = cis_info.get("requestedCis", cis_info.get("cis", ""))
+                            c = (cis_info.get("requestedCis") or cis_info.get("cis")
+                                 or cis_info.get("code") or "")
                             if c:
                                 found.add(c)
                             results[c] = item
@@ -536,6 +537,10 @@ class App:
 
 
 def main() -> None:
+    # Чистим артефакты прошлого самообновления (CISChecker.old, _update_tmp)
+    from ..updater.github import cleanup_after_update
+    cleanup_after_update()
+
     root = Tk()
     app = App(root)
     log_to_gui(f"🚀 {APP_TITLE} v{APP_VERSION}", "bold")

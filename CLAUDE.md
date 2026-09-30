@@ -3,16 +3,17 @@
 Проект для проверки кодов маркировки системы «Честный Знак» (CRPT) через публичный и закрытый (True) API с выгрузкой в Excel.
 
 **Репозиторий:** https://github.com/YoungGoofy/chestnyznak-checker
-**Текущая версия:** `APP_VERSION = "1.2.1"` (в gui_app.py)
+**Текущая версия:** `APP_VERSION = "1.3.0"` (в cischecker/__init__.py; корневые gui_app.py/check_codes.py — реэкспорт-заглушки)
 
 ## Структура
 
 ```
 chestnyznak_checker/
-├── check_codes.py            # CLI + бизнес-логика: HTTP, парсинг, Excel
-├── crypto_auth.py             # Авторизация через УКЭП (КриптоПро CSP)
-├── gui_app.py                 # GUI (tkinter): импортирует check_codes + updater + crypto_auth
-├── updater.py                 # Автообновление через GitHub Releases
+├── cischecker/                # Пакет с реальным кодом (auth/core/gui/updater)
+├── check_codes.py            # CLI (реэкспорт-заглушка на cischecker.core)
+├── crypto_auth.py             # Авторизация через УКЭП (реэкспорт-заглушка на cischecker.auth)
+├── gui_app.py                 # GUI (реэкспорт-заглушка на cischecker.gui)
+├── updater.py                 # Автообновление через GitHub Releases (реэкспорт)
 ├── .github/
 │   └── workflows/
 │       └── build.yml          # GitHub Actions: автосборка .exe при пуше тега v*
@@ -141,7 +142,7 @@ from check_codes import (
     EXCEL_HEADERS, load_env,
 )
 from crypto_auth import (
-    auth_jwt, list_certificates,
+    auth_uuid_token, list_certificates,
     set_log_fn as set_auth_log_fn,
 )
 from updater import (
@@ -165,16 +166,21 @@ from updater import (
 - `_check_updates()` — делегирует в `_run_update_check()`
 - `_apply_update(release_info)` — скачивание и подмена .exe
 
-## Модуль авторизации через УКЭП (crypto_auth.py)
+## Модуль авторизации через УКЭП (cischecker/auth/auth_flow.py)
 
 ### Метод авторизации
-**JWT flow** (единственный метод) — два шага: GET `/true-api/auth/key` → подпись challenge → POST `/true-api/auth/simpleSignIn`
+**Единый токен (UUID)** — основной формат True API с v1.3.0 (JWT — временно поддерживаемый ЧЗ формат, до 31.12.2026; из приложения удалён):
 
-United Token был **удалён в v1.2.0** — остался только JWT flow.
+1. Подпись **ИНН** участника оборота (attached CMS, base64) → POST `/true-api/auth/simpleSignIn` с телом `{"data": <подпись>, "unitedToken": true}`
+2. Ответ: `{"uuidToken": "...", "expireDate": "yyyy-MM-ddTHH:mm:ss.SSSZ"}` → токен в .env, `expireDate` → `.token_expires` (unix ts; фолбэк — 10 ч)
+3. Фолбэк при отказе: классическая пара GET `/true-api/auth/key` (uuid + подпись challenge) с тем же `unitedToken: true`
+
+ИНН берётся из выбранного сертификата УКЭП (OID `1.2.643.3.131.1.1` или Subject DN), при отсутствии — из `CHESTNYZNAK_INN` в .env.
 
 ### Ключевые функции
-- `auth_jwt(thumbprint="")` → `(bool, str)` — JWT авторизация (2 шага)
+- `auth_uuid_token(thumbprint="", inn="")` → `(bool, str, float | None)` — (success, токен|ошибка, expires_ts)
 - `list_certificates()` → `list[dict]` — список сертификатов УКЭП (только действующие, только на съёмных носителях — USB-токен/флешка)
+- `list_all_valid_certificates()` → `list[dict]` — то же без фильтра носителей (для диалога УКЭП)
 - `sign_data(data, thumbprint="")` → `bytes | None` — подпись данных УКЭП (attached CMS)
 - `set_log_fn(fn)` — подключить функцию логирования (для GUI)
 
@@ -201,14 +207,14 @@ United Token был **удалён в v1.2.0** — остался только J
 - **pywin32** нужен для COM-доступа на Windows (`pip install pywin32`), добавлен в `requirements.txt` с условием `sys_platform == "win32"`. Включает `pythoncom` для COM-инициализации.
 - **COM и потоки**: все COM-вызовы обёрнуты в `_com_initialized()` (contextmanager) для `pythoncom.CoInitialize()/CoUninitialize()` — это **КРИТИЧЕСКИ ВАЖНО** для фоновых потоков (threading.Thread).
 - Подпись **присоединённая** (attached CMS), кодируется в base64
-- ИНН для JWT flow — извлекается из сертификата (OID `1.2.643.3.131.1.1` или Subject DN)
+- ИНН для единого токена — извлекается из сертификата (OID `1.2.643.3.131.1.1` или Subject DN)
 
 ### Диалог УКЭП в GUI
 - Меню: Настройки → «🔐 Получить токен через УКЭП»
 - Список сертификатов (Listbox), метод: JWT через УКЭП
 - Кнопка «🔄 Обновить список» — перечитывает сертификаты
-- Кнопка «🔐 Получить токен» → фоновый поток → `auth_jwt(thumbprint)` → сохранение в .env
-- При сохранении токена пишется файл `.token_expires` с unix timestamp истечения (из JWT `exp` payload)
+- Кнопка «🔐 Получить токен» → фоновый поток → `auth_uuid_token(thumbprint, inn)` → сохранение в .env
+- При сохранении токена пишется файл `.token_expires` с unix timestamp истечения (из `expireDate` ответа; фолбэк — 10 ч)
 
 ## Модуль обновлений (updater.py)
 
@@ -224,7 +230,7 @@ United Token был **удалён в v1.2.0** — остался только J
 - `fetch_latest_release()` → dict | None — информация о последнем релизе с GitHub
 - `compare_versions(current, latest)` → int — 1=есть обновление, 0=равны, -1=текущая новее
 - `download_exe(url, dest, progress_fn)` → bool — скачивание .exe с прогрессом
-- `create_updater_bat(old_exe, new_exe)` → Path — .bat скрипт для подмены .exe
+- `cleanup_after_update()` → None — удаляет артефакты прошлого обновления (`CISChecker.old`, `_update_tmp/`); вызывается при старте app
 - `perform_update(exe_url, progress_fn)` → tuple[bool, str] — полный цикл обновления
 - `check_for_update()` → tuple[bool, str, dict|None] — проверка наличия обновления
 
@@ -234,7 +240,7 @@ United Token был **удалён в v1.2.0** — остался только J
 2. Приложение стучится в GitHub Releases API
 3. Сравнивает `tag_name` (напр. `v1.2`) с текущей `APP_VERSION`
 4. Если доступна новая версия:
-   - **В .exe-режиме**: скачивает новый `.exe` в `_update_tmp/` → создаёт `_update.bat` → запускает батник → закрывает приложение → батник ждёт завершения процесса → подменяет .exe → запускает новый → удаляет .bat
+   - **В .exe-режиме**: скачивает новый `.exe` в `_update_tmp/` → переименовывает работающий `CISChecker.exe` в `CISChecker.old` (работающий файл нельзя перезаписать, но можно переименовать) → переносит новый на его место → запускает новый процесс → приложение закрывается. Артефакты (`.old`, `_update_tmp/`) удаляются при следующем старте. Батники не используются.
    - **В .py-режиме**: открывает браузер на страницу релиза GitHub
 
 ## Зависимости
@@ -301,7 +307,7 @@ build.bat
 2. **Токен живёт 8–12 часов**, берётся из `localStorage.getItem('token')` в консоли ЛК Честного Знака.
 3. **Даты в True API — ISO-строки**, в публичном — миллисекундные timestamp. Функция `iso_to_datetime_str` и `ts_to_datetime_str` обрабатывают оба.
 4. **Коды содержат спецсимволы** (`!`, `*`, `'`, `)`, `\"`, `<`, `>` и т.д.) — в CLI лучше передавать через файл, не через аргументы командной строки.
-5. **404 в True API** — может означать как «код не найден», так и «неверная товарная группа». Скрипт перебирает варианты pg через `PG_ALIASES`.
+5. **404 в True API** — может означать как «код не найден», так и «неверная товарная группа». Если тело 404 — JSON-массив, он парсится по-кодовo (строки «ОШИБКА: КИ не найден» в Excel), батч не роняется. Иначе скрипт перебирает варианты pg через `PG_ALIASES`.
 6. **Excel создаётся даже без openpyxl** — fallback в CSV.
 7. **GUI не блокируется** — вся работа в фоновом потоке, логи через очередь.
 8. **true_check_batch** возвращает tuple `(http_status, results)`, а не просто results. Это важное отличие — upstream код должен проверять оба значения.

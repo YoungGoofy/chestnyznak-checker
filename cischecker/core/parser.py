@@ -62,6 +62,11 @@ def parse_result(code: str, data: dict, mode: str) -> list[str]:
     if "error" in data:
         return [code, "", "", "", f"ОШИБКА: {data['error']}", "", "", "", "", ""]
 
+    # Поэлементная ошибка True API: {"code", "errorCode", "errorDescription"}
+    if "errorCode" in data and "cisInfo" not in data:
+        desc = data.get("errorDescription") or data.get("errorCode", "")
+        return [code, "", "", "", f"ОШИБКА: {desc}", "", "", "", "", ""]
+
     row = [""] * 10
     row[0] = code
 
