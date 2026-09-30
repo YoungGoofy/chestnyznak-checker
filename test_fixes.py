@@ -73,25 +73,36 @@ def test_perform_update_swaps_and_relaunches():
         Path(dest).write_bytes(b"NEW" * 500_000)  # > 1 МБ, проходит проверку размера
         return True
 
+    import os
     saved = (gh.download_exe, gh.is_frozen, gh.get_exe_path, _sp.Popen)
+    launch_kwargs = {}
     try:
         gh.download_exe = fake_download
         gh.is_frozen = lambda: True
         gh.get_exe_path = lambda: exe
-        _sp.Popen = lambda args, **kw: launched.append(args)
 
+        def fake_popen(args, **kw):
+            launch_kwargs.update(kw)
+            launched.append(args)
+        _sp.Popen = fake_popen
+
+        # Симулируем окружение старого PyInstaller-процесса
+        os.environ["_MEIPASS2"] = "/tmp/_MEIold"
         ok, msg = gh.perform_update("http://x")
         assert ok, msg
         assert exe.read_bytes()[:3] == b"NEW", "новый exe не на месте"
         assert (tmp / "CISChecker.old").read_bytes() == b"OLD", "старый exe не сохранён в .old"
         assert launched and launched[0][0] == str(exe), launched
         assert not (tmp / "_update_tmp").exists(), "temp не удалён"
+        # Новый exe не должен наследовать распаковку старого процесса
+        assert launch_kwargs.get("env", {}).get("_MEIPASS2") is None, launch_kwargs.get("env")
 
         # cleanup_after_update подтирает .old
         gh.cleanup_after_update()
         assert not (tmp / "CISChecker.old").exists()
     finally:
         gh.download_exe, gh.is_frozen, gh.get_exe_path, _sp.Popen = saved
+        os.environ.pop("_MEIPASS2", None)
 
 
 def test_perform_update_rollback_when_replace_fails():

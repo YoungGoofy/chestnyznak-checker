@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -166,9 +167,16 @@ def perform_update(exe_url: str, progress_fn=None) -> tuple[bool, str]:
         pass
 
     try:
+        # PyInstaller onefile держит путь к своей распаковке в _MEIPASS2.
+        # Унаследовав его от старого процесса, новый exe пропустит собственную
+        # распаковку и будет грузить модули из папки, которую старый процесс
+        # удалит при выходе (симптом: «No module named win32com» после
+        # обновления, лечится перезапуском). Чистим переменную.
+        env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
         subprocess.Popen(
             [str(current_exe)],
             cwd=str(current_exe.parent),
+            env=env,
             close_fds=True,
         )
     except OSError as e:
