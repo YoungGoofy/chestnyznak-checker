@@ -69,3 +69,72 @@ def save_excel(rows: list[list[str]], output_path: str, title: str | None = None
     wb.save(output_path)
     print(f"\n✓ Результат сохранён: {output_path}")
     print(f"  Строк данных: {len(rows)}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Импорт кодов из Excel-отчёта WB
+# ══════════════════════════════════════════════════════════════════════
+
+CODE_COLUMN_HEADERS = ("КИЗ", "Код маркировки", "КМ")
+
+
+def load_codes_from_xlsx(path) -> tuple[list[str], str | None]:
+    """Читает коды из Excel-отчёта (шаблон WB: лист «КИЗ», колонка «КИЗ»).
+
+    Ищет по всем листам колонку с заголовком из CODE_COLUMN_HEADERS,
+    берёт первый лист, где она нашлась и непустая. Коды нормализуются
+    (полные КМ → КИЗ через normalize_code) и дедуплицируются.
+
+    Возвращает (codes, error); error = None при успехе.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        return [], "Нужен openpyxl: pip install openpyxl"
+
+    try:
+        # НЕ read_only: WB-файлы без <dimension>, read_only тогда режет строки
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as e:
+        return [], f"Не удалось открыть файл: {e}"
+
+    codes: list[str] = []
+    try:
+        for ws in wb.worksheets:
+            col_idx = _find_code_column(ws)
+            if col_idx is None:
+                continue
+            codes = _read_column_codes(ws, col_idx)
+            if codes:
+                break
+    finally:
+        wb.close()
+
+    if not codes:
+        return [], ("В файле не найдены коды: нет колонки «КИЗ» "
+                    "(или «Код маркировки»), либо она пустая.")
+    return codes, None
+
+
+def _find_code_column(ws) -> int | None:
+    """Колонка с кодами: заголовок первой строки из CODE_COLUMN_HEADERS."""
+    for row in ws.iter_rows(min_row=1, max_row=1):
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.strip() in CODE_COLUMN_HEADERS:
+                return cell.column
+    return None
+
+
+def _read_column_codes(ws, col_idx: int) -> list[str]:
+    from .checker import normalize_code
+
+    codes: list[str] = []
+    seen: set[str] = set()
+    for (cell,) in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+        if cell.value is None:
+            continue
+        code = normalize_code(str(cell.value))
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes

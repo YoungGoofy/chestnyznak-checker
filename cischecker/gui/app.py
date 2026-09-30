@@ -24,7 +24,7 @@ from ..core.checker import (
     true_check_with_retry_pg, public_check, explain_http_status, normalize_code,
 )
 from ..core.parser import parse_result
-from ..core.excel import save_excel
+from ..core.excel import save_excel, load_codes_from_xlsx
 from ..core.api import http_post
 from ..core.constants import TRUE_API
 
@@ -92,6 +92,7 @@ class App:
         file_menu = Menu(menubar, tearoff=0, bg=COLOR_FRAME_BG, fg=COLOR_BUTTON_FG,
                          activebackground=COLOR_BUTTON_ACTIVE_BG, activeforeground=COLOR_BUTTON_FG)
         file_menu.add_command(label="📂 Загрузить коды из файла...", command=self._load_codes_from_file)
+        file_menu.add_command(label="📊 Загрузить коды из Excel (WB)...", command=self._load_codes_from_wb_report)
         file_menu.add_separator()
         file_menu.add_command(label="🚪 Выход", command=self.root.quit)
         menubar.add_cascade(label="Файл", menu=file_menu)
@@ -247,6 +248,25 @@ class App:
         self.codes_text.delete("1.0", END)
         self.codes_text.insert("1.0", raw.strip())
         log_to_gui(f"📂 Загружено из файла: {path}", "info")
+
+    def _load_codes_from_wb_report(self) -> None:
+        """Загружает КИЗ из Excel-отчёта WB (лист «КИЗ», колонка «КИЗ»)."""
+        path = filedialog.askopenfilename(
+            title="Выберите Excel-отчёт Wildberries",
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        codes, err = load_codes_from_xlsx(path)
+        if err:
+            log_to_gui(f"❌ {err}", "error")
+            messagebox.showerror("Ошибка загрузки", err)
+            return
+
+        self.codes_text.delete("1.0", END)
+        self.codes_text.insert("1.0", "\n".join(codes))
+        log_to_gui(f"📊 Загружено кодов из Excel: {len(codes)} ({path})", "success")
 
     def _load_and_run(self) -> None:
         """Берёт коды из текстового поля. Если пусто — открывает файл."""

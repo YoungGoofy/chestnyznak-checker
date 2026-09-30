@@ -3,7 +3,7 @@
 Проект для проверки кодов маркировки системы «Честный Знак» (CRPT) через публичный и закрытый (True) API с выгрузкой в Excel.
 
 **Репозиторий:** https://github.com/YoungGoofy/chestnyznak-checker
-**Текущая версия:** `APP_VERSION = "1.3.3"` (в cischecker/__init__.py; корневые gui_app.py/check_codes.py — реэкспорт-заглушки)
+**Текущая версия:** `APP_VERSION = "1.3.4"` (в cischecker/__init__.py; корневые gui_app.py/check_codes.py — реэкспорт-заглушки)
 
 ## Структура
 
@@ -56,6 +56,7 @@ chestnyznak_checker/
 - `parse_result(code, data, mode)` → list[str] (10 колонок Excel)
 - `parse_public_row(data)` → list[str] (10 колонок из публичного ответа)
 - `save_excel(rows, output_path)` — пишет .xlsx с Catppuccin-стилем
+- `load_codes_from_xlsx(path)` → tuple[list[str], str | None] — коды из Excel-отчёта WB (шаблон: лист «КИЗ», колонка с заголовком «КИЗ»/«Код маркировки»/«КМ»; полные КМ нормализуются, дедуп; error=None при успехе). Загружается БЕЗ read_only — WB-файлы без `<dimension>`, read_only режет строки.
 - `http_post(url, payload, headers)` — низкоуровневый POST с ретраями
 - `explain_http_status(status_code)` → str — расшифровка HTTP-ошибок для пользователя
 
@@ -119,7 +120,7 @@ chestnyznak_checker/
 - **Цвета**: Catppuccin Mocha
 
 ### Меню
-- **Файл**: Загрузить коды из файла, Выход
+- **Файл**: Загрузить коды из файла, Загрузить коды из Excel (WB), Выход
 - **Настройки**: Токен True API...
 - **Справка**: Инструкция, Проверить обновления..., О программе
 

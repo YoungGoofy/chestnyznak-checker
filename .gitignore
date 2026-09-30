@@ -31,3 +31,5 @@ Thumbs.db
 # Update temp
 _update_tmp/
 _update.bat
+# WB-отчёты с кодами (бизнес-данные)
+wb-gi-*.xlsx

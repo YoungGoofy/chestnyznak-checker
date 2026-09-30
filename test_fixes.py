@@ -187,6 +187,48 @@ def test_normalize_code_fffd_replacement_char():
     assert normalize_code(km) == "0102901386163847215p-rStkAGOsN8"
 
 
+def _make_xlsx(path, sheet_name="КИЗ", rows=None):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    for r in (rows or [["№ задания", "Стикер", "КИЗ", "Стоимость"]]):
+        ws.append(r)
+    wb.save(path)
+
+
+def test_load_codes_from_wb_xlsx():
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        print("  ⏭ пропущен (нет openpyxl)")
+        return
+    from cischecker.core.excel import load_codes_from_xlsx
+    tmp = Path(tempfile.mkdtemp())
+
+    good = tmp / "wb.xlsx"
+    _make_xlsx(good, rows=[
+        ["№ задания", "Стикер", "КИЗ", "Стоимость"],
+        ["1", "111", "0102901386163847215lFnushLjcjQP�91EE11�92fjfF", "100"],
+        ["2", "222", "0104690388119157215mSgG8Db4zal.", "200"],
+        ["3", "333", None, "300"],
+    ])
+    codes, err = load_codes_from_xlsx(good)
+    assert err is None, err
+    assert codes == ["0102901386163847215lFnushLjcjQP",
+                     "0104690388119157215mSgG8Db4zal."], codes
+
+    # нет колонки с кодами
+    bad = tmp / "no.xlsx"
+    _make_xlsx(bad, rows=[["foo", "bar"], ["1", "2"]])
+    codes, err = load_codes_from_xlsx(bad)
+    assert not codes and "КИЗ" in err, (codes, err)
+
+    # несуществующий файл
+    codes, err = load_codes_from_xlsx(tmp / "missing.xlsx")
+    assert not codes and err, (codes, err)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
