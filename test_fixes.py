@@ -124,6 +124,29 @@ def test_perform_update_rollback_when_replace_fails():
         gh.download_exe, gh.is_frozen, gh.get_exe_path = saved
 
 
+def test_save_token_to_env_roundtrip():
+    """Токен перезаписывается, thumbprint последнего сертификата сохраняется."""
+    import os
+    from cischecker.core.env import save_token_to_env
+    tmp = Path(tempfile.mkdtemp())
+
+    save_token_to_env(tmp, "tok1", "1234567890", "ABC")
+    text = (tmp / ".env").read_text("utf-8")
+    assert "CHESTNYZNAK_TOKEN=tok1" in text
+    assert "CHESTNYZNAK_INN=1234567890" in text
+    assert "CHESTNYZNAK_THUMBPRINT=ABC" in text
+
+    # Обновили только токен — thumbprint и ИНН остаются на месте
+    save_token_to_env(tmp, "tok2", "1234567890", "")
+    text = (tmp / ".env").read_text("utf-8")
+    assert "CHESTNYZNAK_TOKEN=tok2" in text
+    assert "CHESTNYZNAK_THUMBPRINT=ABC" in text
+    assert "CHESTNYZNAK_INN=1234567890" in text
+
+    assert os.environ.get("CHESTNYZNAK_TOKEN") == "tok2"
+    assert os.environ.get("CHESTNYZNAK_THUMBPRINT") == "ABC"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -18,7 +18,8 @@ from tkinter import ttk
 
 from .. import APP_TITLE, APP_VERSION, GITHUB_REPO
 from ..core.constants import PRODUCT_GROUPS, PRODUCT_GROUPS_DEFAULT, BATCH_SIZE
-from ..core.env import load_env
+from ..core.env import load_env, save_token_to_env
+from ..auth.auth_flow import auth_uuid_token, set_log_fn as set_auth_flow_log_fn
 from ..core.checker import (
     true_check_with_retry_pg, public_check, explain_http_status,
 )
@@ -77,6 +78,10 @@ class App:
 
         # Автопроверка обновлений
         self.root.after(1500, self.updater_ui.auto_check)
+
+        # Тихий перевыпуск протухшего токена последним сертификатом
+        set_auth_flow_log_fn(log_to_gui)
+        self.root.after(2500, self._silent_reauth_if_needed)
 
     # ── Меню ────────────────────────────────────────────────────────
 
@@ -275,6 +280,49 @@ class App:
 
     # ── True API ───────────────────────────────────────────────────
 
+    # ── Тихий перевыпуск токена ─────────────────────────────────────
+
+    def _try_silent_reauth(self) -> str | None:
+        """Перевыпускает токен последним использованным сертификатом.
+
+        Без диалогов. Вызывать ТОЛЬКО из фонового потока (COM + сеть).
+        Возвращает новый токен или None.
+        """
+        thumbprint = os.environ.get("CHESTNYZNAK_THUMBPRINT", "")
+        if not thumbprint:
+            return None
+
+        inn = os.environ.get("CHESTNYZNAK_INN", "")
+        log_to_gui("🔄 Перевыпускаю токен через УКЭП (тихий режим)...", "info")
+        success, token, expires_at = auth_uuid_token(thumbprint, inn)
+        if not success:
+            first_line = token.splitlines()[0] if token else "неизвестная ошибка"
+            log_to_gui(f"⚠ Автоперевыпуск не удался: {first_line}", "warn")
+            return None
+
+        save_token_to_env(SCRIPT_DIR, token, inn, thumbprint)
+        exp_path = SCRIPT_DIR / ".token_expires"
+        exp_path.write_text(str(expires_at if expires_at else time.time() + 36000), "utf-8")
+        self.root.after(0, lambda: self._update_token_status(token))
+        log_to_gui("✅ Токен перевыпущен автоматически", "success")
+        return token
+
+    def _silent_reauth_if_needed(self) -> None:
+        """При старте: токен просрочен/отсутствует → тихий перевыпуск в фоне."""
+        token = os.environ.get("CHESTNYZNAK_TOKEN", "")
+        if token:
+            try:
+                expires = float((SCRIPT_DIR / ".token_expires").read_text("utf-8").strip())
+            except (OSError, ValueError):
+                expires = None
+            if expires and expires > time.time() + 300:
+                return  # токен жив минимум ещё 5 минут — не трогаем
+
+        if not os.environ.get("CHESTNYZNAK_THUMBPRINT", ""):
+            return  # нет запомненного сертификата — тихо молчим
+
+        threading.Thread(target=self._try_silent_reauth, daemon=True).start()
+
     def _quick_auth_check(self, token: str, pg_code: str = "lp") -> str | None:
         test_codes = ["0102901036818042215U)lMHIaW2qGO"]
         url = f"{TRUE_API}?pg={pg_code}"
@@ -316,8 +364,15 @@ class App:
         token = os.environ.get("CHESTNYZNAK_TOKEN", "")
 
         def worker():
+            nonlocal token  # перевыпуск токена по 401 перезаписывает его
             log_to_gui("⏳ Проверка токена...", "info")
             auth_error = self._quick_auth_check(token, pg_code)
+            if auth_error:
+                # Тихий перевыпуск протухшего токена и повторная проверка
+                new_token = self._try_silent_reauth()
+                if new_token:
+                    token = new_token
+                    auth_error = self._quick_auth_check(token, pg_code)
             if auth_error:
                 log_to_gui(f"❌ {auth_error}", "error")
                 log_to_gui("ПРОВЕРКА ПРЕРВАНА: неверный токен.", "bold")
@@ -332,7 +387,9 @@ class App:
                 total = len(self.codes)
                 checked = 0
 
-                for batch_start in range(0, total, BATCH_SIZE):
+                batch_start = 0
+                reauthed = False
+                while batch_start < total:
                     if self._stop_requested:
                         log_to_gui("⏹ Остановлено пользователем.", "warn")
                         break
@@ -363,7 +420,17 @@ class App:
                         if found and unmatched == len(batch):
                             log_to_gui("  ⚠ Ни один код не распознан. Возможно неверная ТГ!", "warn")
                         self.root.after(0, self.progress_var.set, f"Проверка: {checked}/{total}")
+                        batch_start += BATCH_SIZE
                     else:
+                        # 401 среди батчей → один тихий перевыпуск и повтор этого же батча
+                        if status == 401 and not reauthed:
+                            reauthed = True
+                            new_token = self._try_silent_reauth()
+                            if new_token:
+                                token = new_token
+                                log_to_gui("  🔄 Повторяю батч с новым токеном...", "info")
+                                continue
+
                         err_msg = explain_http_status(status)
                         for code in batch:
                             results[code] = {"error": f"True API: {err_msg}"}
@@ -371,10 +438,11 @@ class App:
                         log_to_gui(f"  ✗ Батч {batch_num}/{total_batches}: {err_msg}", "error")
                         if status in (401, 403, 429, 451):
                             log_to_gui("  ⏹ Прерываю — ошибка авторизации.", "error")
-                            for code in self.codes[batch_start + BATCH_SIZE:]:
+                            for code in self.codes[batch_start + len(batch):]:
                                 results[code] = {"error": f"True API: {err_msg}"}
                             break
                         self.root.after(0, self.progress_var.set, f"Проверка: {checked}/{total}")
+                        batch_start += BATCH_SIZE
 
                     time.sleep(0.05)  # уменьшено с 0.15
 

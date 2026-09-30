@@ -34,15 +34,19 @@ def load_env(script_dir: Path) -> None:
         pass
 
 
-def save_token_to_env(script_dir: Path, token: str, inn: str = "") -> None:
-    """Сохраняет токен (и опционально ИНН) в .env файл.
+def save_token_to_env(script_dir: Path, token: str, inn: str = "",
+                      thumbprint: str = "") -> None:
+    """Сохраняет токен (и опционально ИНН, thumbprint) в .env файл.
 
-    Устраняет дублирование кода сохранения токена в GUI.
+    Пустой inn удаляет строку ИНН; пустой thumbprint — сохраняет
+    прежний (это «последний использованный сертификат» для тихого
+    перевыпуска токена).
     """
     env_path = script_dir / ".env"
     lines: list[str] = []
     found_token = False
     found_inn = False
+    found_thumb = False
 
     if env_path.exists():
         for line in env_path.read_text("utf-8").splitlines():
@@ -54,6 +58,12 @@ def save_token_to_env(script_dir: Path, token: str, inn: str = "") -> None:
                     lines.append(f"CHESTNYZNAK_INN={inn}")
                     found_inn = True
                 # Если inn пустой — пропускаем строку (удаляем)
+            elif line.startswith("CHESTNYZNAK_THUMBPRINT="):
+                if thumbprint:
+                    lines.append(f"CHESTNYZNAK_THUMBPRINT={thumbprint}")
+                else:
+                    lines.append(line)  # прежний thumbprint не трогаем
+                found_thumb = True
             else:
                 lines.append(line)
 
@@ -61,6 +71,8 @@ def save_token_to_env(script_dir: Path, token: str, inn: str = "") -> None:
         lines.append(f"CHESTNYZNAK_TOKEN={token}")
     if inn and not found_inn:
         lines.append(f"CHESTNYZNAK_INN={inn}")
+    if thumbprint and not found_thumb:
+        lines.append(f"CHESTNYZNAK_THUMBPRINT={thumbprint}")
 
     env_path.write_text("\n".join(lines) + "\n", "utf-8")
 
@@ -68,3 +80,5 @@ def save_token_to_env(script_dir: Path, token: str, inn: str = "") -> None:
     os.environ["CHESTNYZNAK_TOKEN"] = token
     if inn:
         os.environ["CHESTNYZNAK_INN"] = inn
+    if thumbprint:
+        os.environ["CHESTNYZNAK_THUMBPRINT"] = thumbprint

@@ -406,7 +406,7 @@ class UkepDialog:
             def on_done():
                 self.btn_auth.config(state=NORMAL)
                 if success:
-                    save_token_to_env(self.script_dir, result, inn_from_cert)
+                    save_token_to_env(self.script_dir, result, inn_from_cert, thumbprint)
 
                     # Сохраняем срок действия (expireDate из ответа, фолбэк — 10 часов)
                     exp_path = self.script_dir / ".token_expires"
