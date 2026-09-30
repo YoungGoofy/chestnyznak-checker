@@ -21,7 +21,7 @@ from ..core.constants import PRODUCT_GROUPS, PRODUCT_GROUPS_DEFAULT, BATCH_SIZE
 from ..core.env import load_env, save_token_to_env
 from ..auth.auth_flow import auth_uuid_token, set_log_fn as set_auth_flow_log_fn
 from ..core.checker import (
-    true_check_with_retry_pg, public_check, explain_http_status,
+    true_check_with_retry_pg, public_check, explain_http_status, normalize_code,
 )
 from ..core.parser import parse_result
 from ..core.excel import save_excel
@@ -219,11 +219,13 @@ class App:
         """Парсит коды из текста. Разделитель — только новая строка.
 
         Коды маркировки могут содержать запятые и точки с запятой,
-        поэтому разделяем ТОЛЬКО по переносам строк.
+        поэтому разделяем ТОЛЬКО по '\n'. ВАЖНО: splitlines() не подходит —
+        он режет и по GS (\x1d), который есть в полных КМ.
+        Полные КМ обрезаются до КИЗ по GS-разделителю (normalize_code).
         Пустые строки пропускаются, пробелы по краям обрезаются.
         Дедупликация.
         """
-        codes = [line.strip() for line in text.splitlines() if line.strip()]
+        codes = [normalize_code(line) for line in text.split("\n") if line.strip()]
         seen: set[str] = set()
         return [c for c in codes if not (c in seen or seen.add(c))]
 

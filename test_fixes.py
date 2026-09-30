@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cischecker.core import checker
+from cischecker.core.checker import normalize_code
 from cischecker.core.parser import parse_result
 from cischecker.auth import auth_flow
 from cischecker.updater import github as gh
@@ -156,6 +157,34 @@ def test_save_token_to_env_roundtrip():
 
     assert os.environ.get("CHESTNYZNAK_TOKEN") == "tok2"
     assert os.environ.get("CHESTNYZNAK_THUMBPRINT") == "ABC"
+
+
+def test_normalize_code_cuts_gs_groups():
+    """Полный КМ (с GS-разделителями и группами 91/92) → КИЗ."""
+    km = ("0102901386163847215J!QXc9dnLcgR"
+          "\x1d91EE11"
+          "\x1d92ggY8UbkdmtThvxY5LbGE1GDKgD1/8xthjCxqPTUP+J8=")
+    assert normalize_code(km) == "0102901386163847215J!QXc9dnLcgR"
+
+
+def test_normalize_code_space_substituted_gs():
+    """GS, превратившийся в пробел при копипасте, — тоже режем."""
+    assert normalize_code("0104690388119157215mSgG8Db4zal. 93GE2m") == \
+        "0104690388119157215mSgG8Db4zal."
+
+
+def test_normalize_code_plain_kiz_untouched():
+    kiz = "0102901036818042215U)lMHIaW2qGO"
+    assert normalize_code(kiz) == kiz
+    assert normalize_code("  " + kiz + "  ") == kiz
+
+
+def test_normalize_code_fffd_replacement_char():
+    """GS, покорёженный перекодировкой в U+FFFD (�), — тоже режем."""
+    km = ("0102901386163847215p-rStkAGOsN8"
+          "�91EE11"
+          "�92wUuHiPyhwzJAtlKCsjysh1LAx1SoL/l/JPrKxckhD8s=")
+    assert normalize_code(km) == "0102901386163847215p-rStkAGOsN8"
 
 
 if __name__ == "__main__":

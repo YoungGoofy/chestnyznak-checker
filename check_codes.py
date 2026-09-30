@@ -25,6 +25,7 @@ from cischecker.core.checker import (
     get_pg_from_public,
     resolve_pg_aliases,
     explain_http_status,
+    normalize_code,
 )
 from cischecker.core.parser import parse_result, parse_public_row
 from cischecker.core.excel import save_excel
@@ -68,16 +69,17 @@ def main():
     args = parser.parse_args()
     use_true = args.true or not args.public
 
-    # Сбор кодов
-    codes = list(args.codes)
+    # Сбор кодов (полные КМ обрезаются до КИЗ по GS-разделителю)
+    codes = [normalize_code(c) for c in args.codes]
     if args.file:
         p = Path(args.file)
         if not p.exists():
             print(f"❌ Файл не найден: {args.file}", file=sys.stderr)
             sys.exit(1)
-        codes.extend(l.strip() for l in p.read_text("utf-8").splitlines() if l.strip())
+        # split('\n'), а не splitlines(): splitlines режет и по GS (\x1d) из полных КМ
+        codes.extend(normalize_code(l) for l in p.read_text("utf-8").split("\n") if l.strip())
     if args.stdin:
-        codes.extend(l.strip() for l in sys.stdin.read().splitlines() if l.strip())
+        codes.extend(normalize_code(l) for l in sys.stdin.read().split("\n") if l.strip())
     if not codes:
         parser.print_help()
         sys.exit(1)
