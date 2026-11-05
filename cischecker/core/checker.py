@@ -18,14 +18,16 @@ from .constants import (
 # ══════════════════════════════════════════════════════════════════════
 
 GS = "\x1d"  # GS1 Group Separator (ASCII 29)
+LP_CODE_LENGTH = 31
 
 
-def normalize_code(raw: str) -> str:
-    """КМ → КИЗ: обрезает всё после первого GS-разделителя.
+def normalize_code(raw: str, pg: str | None = None) -> str:
+    """КМ → КИЗ: обрезает криптохвост по GS, а для lp — до 31 символа.
 
     Поддерживаются сам GS (\\x1d), его текстовые записи и варианты,
     появляющиеся при копипасте/перекодировке: пробел, другие контрольные
     символы (< 0x20) или U+FFFD (�) — КИЗ таких символов не содержит.
+    Обрезка lp по длине работает и когда сканер потерял GS перед AI 91/93.
     """
     code = raw.strip()
     lower_code = code.lower()
@@ -35,11 +37,32 @@ def normalize_code(raw: str) -> str:
         if lower_code.find(separator) >= 0
     ]
     if positions:
-        return code[:min(positions)].strip()
-    for i, ch in enumerate(code):
-        if ch.isspace() or ch == "�" or ord(ch) < 32:
-            return code[:i].strip()
+        code = code[:min(positions)].strip()
+    else:
+        for i, ch in enumerate(code):
+            if ch.isspace() or ch == "�" or ord(ch) < 32:
+                code = code[:i].strip()
+                break
+    if pg == "lp" and len(code) > LP_CODE_LENGTH:
+        return code[:LP_CODE_LENGTH]
     return code
+
+
+def validate_code(code: str, pg: str | None = None) -> str | None:
+    """Возвращает описание структурной ошибки КИЗ или None для валидного кода."""
+    if not code:
+        return "пустой код"
+    if pg != "lp":
+        return None
+    if len(code) != LP_CODE_LENGTH:
+        return f"длина {len(code)} вместо 31 символа"
+    if not code.startswith("01") or not code[:16].isascii() or not code[:16].isdigit():
+        return "ожидаются 01 и GTIN из 14 цифр"
+    if code[16:18] != "21":
+        return "после GTIN отсутствует идентификатор 21"
+    if any(not ch.isascii() or not ch.isprintable() or ch.isspace() for ch in code[18:]):
+        return "серийный номер содержит недопустимые символы"
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -87,7 +110,11 @@ def resolve_pg_aliases(category: str) -> list[str]:
 def true_check_batch(codes: list[str], pg: str, token: str, debug: bool = False,
                      log_fn=None) -> tuple[int | None, list[dict] | None]:
     """Пакетная проверка через True API. Возвращает (http_status, results)."""
-    codes = [normalize_code(code) for code in codes]
+    codes = [normalize_code(code, pg) for code in codes]
+    invalid = [(code, validate_code(code, pg)) for code in codes]
+    errors = [f"{code}: {error}" for code, error in invalid if error]
+    if errors:
+        raise ValueError("Некорректные коды, запрос в ЧЗ отменён: " + "; ".join(errors))
     url = f"{TRUE_API}?pg={pg}"
     headers = {
         "Content-Type": "application/json",

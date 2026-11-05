@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from cischecker.core import checker
-from cischecker.core.checker import normalize_code
+from cischecker.core.checker import normalize_code, validate_code
 from cischecker.core.parser import parse_result
 from cischecker.auth import auth_flow
 from cischecker.updater import github as gh
@@ -225,6 +225,45 @@ def test_normalize_code_cuts_gs_groups():
           "\x1d91EE11"
           "\x1d92ggY8UbkdmtThvxY5LbGE1GDKgD1/8xthjCxqPTUP+J8=")
     assert normalize_code(km) == "0102901386163847215J!QXc9dnLcgR"
+
+
+def test_normalize_lp_code_with_and_without_gs():
+    """КИ lp имеет 31 символ; AI 91/93 отрезаются даже без GS."""
+    assert len(CODE) == 31
+    tails = ("\x1d91EE11\x1d92crypto", "91EE1192crypto", "93GE2m", "\x1d93GE2m")
+    for tail in tails:
+        assert normalize_code(CODE + tail, "lp") == CODE
+
+
+def test_normalize_lp_does_not_cut_markers_inside_serial():
+    """Цифры 91/93 внутри серийного номера не считаются криптохвостом."""
+    code = CODE[:18] + "91" + CODE[20:]
+    assert normalize_code(code + "93GE2m", "lp") == code
+
+
+def test_validate_lp_code_structure():
+    assert validate_code(CODE, "lp") is None
+    assert "31" in validate_code(CODE[:-1], "lp")
+    assert "GTIN" in validate_code(CODE[:2] + "X" + CODE[3:], "lp")
+    assert "21" in validate_code(CODE[:16] + "22" + CODE[18:], "lp")
+    assert "серийный" in validate_code(CODE[:-1] + "я", "lp")
+
+
+def test_true_api_rejects_invalid_lp_code_before_http():
+    called = []
+
+    def fake_http(url, payload, headers, debug=False):
+        called.append(payload)
+        return 200, "[]"
+
+    checker.http_post = fake_http
+    try:
+        checker.true_check_batch([CODE[:-1]], "lp", "tok")
+    except ValueError as e:
+        assert "запрос в ЧЗ отменён" in str(e)
+    else:
+        raise AssertionError("Битый lp-код не был отклонён")
+    assert not called, called
 
 
 def test_normalize_code_escaped_gs_groups():

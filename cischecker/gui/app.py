@@ -21,7 +21,7 @@ from ..core.constants import PRODUCT_GROUPS, PRODUCT_GROUPS_DEFAULT, BATCH_SIZE
 from ..core.env import load_env, save_token_to_env
 from ..auth.auth_flow import auth_uuid_token, set_log_fn as set_auth_flow_log_fn
 from ..core.checker import (
-    true_check_with_retry_pg, public_check, explain_http_status, normalize_code,
+    true_check_with_retry_pg, public_check, explain_http_status, normalize_code, validate_code,
 )
 from ..core.parser import parse_result
 from ..core.excel import save_excel, load_codes_from_xlsx
@@ -60,6 +60,7 @@ class App:
         self.parsed_rows: list[list[str]] | None = None
         self.is_processing = False
         self._stop_requested = False
+        self._normalizing_codes = False
 
         # Загружаем .env
         load_env(SCRIPT_DIR)
@@ -177,6 +178,8 @@ class App:
                                       values=list(PRODUCT_GROUPS.keys()),
                                       state="readonly", width=32, font=FONT_SMALL)
         self.pg_combo.pack(side="left")
+        self.pg_combo.bind("<<ComboboxSelected>>",
+                           lambda _event: self._normalize_codes_field())
 
         # Прогресс
         self.progress_var = StringVar(value="Готов")
@@ -189,7 +192,7 @@ class App:
         codes_frame.pack(fill="x", side="top", padx=8, pady=(4, 0))
 
         Label(codes_frame,
-              text="Коды маркировки (каждый код с новой строки):",
+              text="Коды маркировки (каждый код с новой строки; для lp — 31 символ):",
               font=FONT_SMALL, bg=COLOR_FRAME_BG, fg=COLOR_LOG_INFO
               ).pack(anchor="w", padx=4, pady=(4, 2))
 
@@ -206,6 +209,8 @@ class App:
         self.codes_text.config(yscrollcommand=codes_sb.set)
         self.codes_text.pack(side="left", fill="x", expand=True)
         codes_sb.pack(side="right", fill="y")
+        self.codes_text.bind("<<Modified>>", self._on_codes_modified)
+        self.codes_text.edit_modified(False)
 
         # Логи
         log_frame = Frame(self.root, bg=COLOR_BG)
@@ -215,20 +220,43 @@ class App:
 
     # ── Загрузка и запуск ──────────────────────────────────────────
 
-    @staticmethod
-    def _parse_codes_from_text(text: str) -> list[str]:
-        """Парсит коды из текста. Разделитель — только новая строка.
+    def _selected_pg_code(self) -> str:
+        return PRODUCT_GROUPS.get(self.pg_var.get(), "lp")
 
-        Коды маркировки могут содержать запятые и точки с запятой,
-        поэтому разделяем ТОЛЬКО по '\n'. ВАЖНО: splitlines() не подходит —
-        он режет и по GS (\x1d), который есть в полных КМ.
-        Полные КМ обрезаются до КИЗ по GS-разделителю (normalize_code).
-        Пустые строки пропускаются, пробелы по краям обрезаются.
-        Дедупликация.
-        """
-        codes = [normalize_code(line) for line in text.split("\n") if line.strip()]
+    @staticmethod
+    def _normalize_codes_text(text: str, pg: str | None = None) -> str:
+        return "\n".join(
+            normalize_code(line, pg) if line.strip() else line
+            for line in text.split("\n")
+        )
+
+    def _normalize_codes_field(self) -> None:
+        text = self.codes_text.get("1.0", "end-1c")
+        normalized = self._normalize_codes_text(text, self._selected_pg_code())
+        if normalized == text:
+            return
+        cursor = self.codes_text.index("insert")
+        self._normalizing_codes = True
+        try:
+            self.codes_text.delete("1.0", END)
+            self.codes_text.insert("1.0", normalized)
+            self.codes_text.edit_modified(False)
+            self.codes_text.mark_set("insert", cursor)
+        finally:
+            self._normalizing_codes = False
+
+    def _on_codes_modified(self, _event=None) -> None:
+        if self._normalizing_codes or not self.codes_text.edit_modified():
+            return
+        self.codes_text.edit_modified(False)
+        self._normalize_codes_field()
+
+    @staticmethod
+    def _parse_codes_from_text(text: str, pg: str | None = None) -> list[str]:
+        """Нормализует коды, разделённые только '\n', и удаляет дубликаты."""
+        codes = [normalize_code(line, pg) for line in text.split("\n") if line.strip()]
         seen: set[str] = set()
-        return [c for c in codes if not (c in seen or seen.add(c))]
+        return [c for c in codes if c and not (c in seen or seen.add(c))]
 
     def _load_codes_from_file(self) -> None:
         """Загружает коды из файла и вставляет в текстовое поле."""
@@ -274,17 +302,36 @@ class App:
             messagebox.showwarning("Идёт обработка", "Дождитесь завершения текущей проверки.")
             return
 
+        pg_code = self._selected_pg_code()
+        self._normalize_codes_field()
         text = self.codes_text.get("1.0", END).strip()
         if not text:
             # Поле пустое — предлагаем загрузить файл
             self._load_codes_from_file()
+            self._normalize_codes_field()
             text = self.codes_text.get("1.0", END).strip()
             if not text:
                 return
 
-        self.codes = self._parse_codes_from_text(text)
+        self.codes = self._parse_codes_from_text(text, pg_code)
         if not self.codes:
             messagebox.showwarning("Нет кодов", "Введите хотя бы один код маркировки.")
+            return
+
+        invalid = [
+            (line_num, code, validate_code(code, pg_code))
+            for line_num, code in enumerate(self.codes, 1)
+        ]
+        errors = [(line_num, error) for line_num, _code, error in invalid if error]
+        if errors:
+            details = "\n".join(f"Строка {line_num}: {error}" for line_num, error in errors[:5])
+            if len(errors) > 5:
+                details += f"\n…и ещё {len(errors) - 5}"
+            log_to_gui(f"❌ Проверка отменена: некорректных кодов — {len(errors)}.", "error")
+            messagebox.showwarning(
+                "Некорректные коды",
+                "Проверка не запущена. Исправьте коды:\n\n" + details,
+            )
             return
 
         self._run_check()
