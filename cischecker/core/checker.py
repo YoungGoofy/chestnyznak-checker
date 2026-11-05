@@ -21,13 +21,21 @@ GS = "\x1d"  # GS1 Group Separator (ASCII 29)
 
 
 def normalize_code(raw: str) -> str:
-    """КМ → КИЗ: обрезает всё после GS-разделителя (группы AI 91/92/93...).
+    """КМ → КИЗ: обрезает всё после первого GS-разделителя.
 
-    GS (\\x1d) при копипасте/перекодировке превращается в пробел или
-    U+FFFD (�). Режем по первому «мусорному» символу: пробел, любой
-    контрольный (< 0x20, включая GS) или U+FFFD — КИЗ таких не содержит.
+    Поддерживаются сам GS (\\x1d), его текстовые записи и варианты,
+    появляющиеся при копипасте/перекодировке: пробел, другие контрольные
+    символы (< 0x20) или U+FFFD (�) — КИЗ таких символов не содержит.
     """
     code = raw.strip()
+    lower_code = code.lower()
+    positions = [
+        lower_code.find(separator)
+        for separator in (GS, r"\x1d", r"\u001d", "/x1d", "/u001d")
+        if lower_code.find(separator) >= 0
+    ]
+    if positions:
+        return code[:min(positions)].strip()
     for i, ch in enumerate(code):
         if ch.isspace() or ch == "�" or ord(ch) < 32:
             return code[:i].strip()
@@ -40,6 +48,7 @@ def normalize_code(raw: str) -> str:
 
 def public_check(code: str, debug: bool = False) -> dict | None:
     """Проверка одного кода через публичный API."""
+    code = normalize_code(code)
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -78,6 +87,7 @@ def resolve_pg_aliases(category: str) -> list[str]:
 def true_check_batch(codes: list[str], pg: str, token: str, debug: bool = False,
                      log_fn=None) -> tuple[int | None, list[dict] | None]:
     """Пакетная проверка через True API. Возвращает (http_status, results)."""
+    codes = [normalize_code(code) for code in codes]
     url = f"{TRUE_API}?pg={pg}"
     headers = {
         "Content-Type": "application/json",

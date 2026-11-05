@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -143,9 +144,7 @@ def perform_update(exe_url: str, progress_fn=None) -> tuple[bool, str]:
             temp_dir.rmdir()
         return False, f"Скачанный файл слишком мал ({file_size} байт)."
 
-    # Подмена на лету: работающий .exe нельзя перезаписать, но можно
-    # переименовать. Переименовываем старый, переносим новый на его место,
-    # запускаем новый процесс и выходим — без .bat и ожидания смерти PID.
+    # Работающий .exe нельзя перезаписать, но можно переименовать.
     backup = current_exe.with_suffix(".old")
     renamed = False
     try:
@@ -167,18 +166,41 @@ def perform_update(exe_url: str, progress_fn=None) -> tuple[bool, str]:
         pass
 
     try:
-        # PyInstaller onefile держит путь к своей распаковке в _MEIPASS2.
-        # Унаследовав его от старого процесса, новый exe пропустит собственную
-        # распаковку и будет грузить модули из папки, которую старый процесс
-        # удалит при выходе (симптом: «No module named win32com» после
-        # обновления, лечится перезапуском). Чистим переменную.
+        # Новый процесс не должен использовать временную распаковку старого.
         env = {k: v for k, v in os.environ.items() if k != "_MEIPASS2"}
-        subprocess.Popen(
-            [str(current_exe)],
-            cwd=str(current_exe.parent),
-            env=env,
-            close_fds=True,
-        )
+        popen_kwargs = {
+            "cwd": str(current_exe.parent),
+            "env": env,
+            "close_fds": True,
+        }
+        if sys.platform == "win32":
+            old_pid = os.getpid()
+            exe_ps = str(current_exe).replace("'", "''")
+            cwd_ps = str(current_exe.parent).replace("'", "''")
+            script = (
+                f"Wait-Process -Id {old_pid} -Timeout 60 "
+                "-ErrorAction SilentlyContinue; "
+                f"Start-Process -FilePath '{exe_ps}' "
+                f"-WorkingDirectory '{cwd_ps}'"
+            )
+            encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+            args = [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-WindowStyle", "Hidden", "-EncodedCommand", encoded_script,
+            ]
+            popen_kwargs.update({
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "creationflags": (
+                    getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                ),
+            })
+        else:
+            args = [str(current_exe)]
+        subprocess.Popen(args, **popen_kwargs)
     except OSError as e:
         return False, (
             f"Обновление установлено, но запустить не удалось: {e}.\n"

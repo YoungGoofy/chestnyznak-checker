@@ -43,6 +43,21 @@ def test_404_with_dict_body_still_fails():
     assert status == 404 and data is None, (status, data)
 
 
+def test_api_requests_use_normalized_codes():
+    """В оба API уходит только первая часть КМ до GS."""
+    requests = []
+
+    def fake_http(url, payload, headers, debug=False):
+        requests.append(json.loads(payload))
+        return 200, "{}"
+
+    checker.http_post = fake_http
+    km = CODE + "\x1d91EE11\x1d92crypto"
+    checker.true_check_batch([km], "lp", "tok")
+    checker.public_check(km)
+    assert requests == [[CODE], {"code": CODE}], requests
+
+
 def test_parse_result_error_item():
     row = parse_result(CODE, {"code": CODE, "errorCode": "404",
                               "errorDescription": "КИ не найден"}, "true")
@@ -106,6 +121,51 @@ def test_perform_update_swaps_and_relaunches():
         os.environ.pop("_MEIPASS2", None)
 
 
+def test_perform_update_windows_waits_before_relaunch():
+    """Windows: независимый launcher ждёт старый PID и затем запускает новый exe."""
+    import base64
+    import os
+
+    tmp = Path(tempfile.mkdtemp())
+    exe = tmp / "CISChecker.exe"
+    exe.write_bytes(b"OLD")
+    launched = []
+    launch_kwargs = {}
+
+    def fake_download(url, dest, progress_fn=None):
+        Path(dest).write_bytes(b"NEW" * 500_000)
+        return True
+
+    saved = (gh.download_exe, gh.is_frozen, gh.get_exe_path, _sp.Popen, gh.sys.platform)
+    try:
+        gh.download_exe = fake_download
+        gh.is_frozen = lambda: True
+        gh.get_exe_path = lambda: exe
+        gh.sys.platform = "win32"
+
+        def fake_popen(args, **kw):
+            launched.append(args)
+            launch_kwargs.update(kw)
+        _sp.Popen = fake_popen
+
+        ok, msg = gh.perform_update("http://x")
+        assert ok, msg
+        assert launched and launched[0][0] == "powershell.exe", launched
+        args = launched[0]
+        encoded = args[args.index("-EncodedCommand") + 1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        assert f"Wait-Process -Id {os.getpid()} " in script, script
+        assert f"Start-Process -FilePath '{exe}'" in script, script
+        assert launch_kwargs["creationflags"] & 0x00000008, launch_kwargs
+        assert launch_kwargs["creationflags"] & 0x00000200, launch_kwargs
+        assert launch_kwargs["stdin"] == _sp.DEVNULL
+        assert launch_kwargs["stdout"] == _sp.DEVNULL
+        assert launch_kwargs["stderr"] == _sp.DEVNULL
+    finally:
+        (gh.download_exe, gh.is_frozen, gh.get_exe_path,
+         _sp.Popen, gh.sys.platform) = saved
+
+
 def test_perform_update_rollback_when_replace_fails():
     """Сбой подмены после переименования → exe откатывается из .old."""
     tmp = Path(tempfile.mkdtemp())
@@ -165,6 +225,13 @@ def test_normalize_code_cuts_gs_groups():
           "\x1d91EE11"
           "\x1d92ggY8UbkdmtThvxY5LbGE1GDKgD1/8xthjCxqPTUP+J8=")
     assert normalize_code(km) == "0102901386163847215J!QXc9dnLcgR"
+
+
+def test_normalize_code_escaped_gs_groups():
+    """Текстовые обозначения GS тоже отделяют КИЗ от криптохвоста."""
+    kiz = "0102901386163847215J!QXc9dnLcgR"
+    for separator in (r"\x1d", r"\u001d", "/x1d", "/u001d"):
+        assert normalize_code(kiz + separator + "91EE11" + separator + "92crypto") == kiz
 
 
 def test_normalize_code_space_substituted_gs():
