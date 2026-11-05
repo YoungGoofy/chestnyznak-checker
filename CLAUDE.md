@@ -3,7 +3,7 @@
 Проект для проверки кодов маркировки системы «Честный Знак» (CRPT) через публичный и закрытый (True) API с выгрузкой в Excel.
 
 **Репозиторий:** https://github.com/YoungGoofy/chestnyznak-checker
-**Текущая версия:** `APP_VERSION = "1.3.4"` (в cischecker/__init__.py; корневые gui_app.py/check_codes.py — реэкспорт-заглушки)
+**Текущая версия:** `APP_VERSION = "1.3.5"` (в cischecker/__init__.py; корневые gui_app.py/check_codes.py — реэкспорт-заглушки)
 
 ## Структура
 
